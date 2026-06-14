@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net35</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>DwarfsMod</AssemblyName>
+    <RootNamespace>DwarfsMod</RootNamespace>
+    <!-- gets loaded into the x86 game process, an AnyCPU library is fine there -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- build time only, lets the modern SDK target .NET 3.5 without the old dev pack -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- the control panel window -->
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+</Project>

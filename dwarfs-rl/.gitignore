@@ -1,0 +1,14 @@
+# build output
+bin/
+obj/
+*.user
+.vs/
+
+# a local patched copy of the game, never commit game files
+game-patched/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -79,7 +79,7 @@ namespace DwarfsMod
             Controls.Add(lblCmd);
 
             txtCommand = new TextBox();
-            txtCommand.Text = "python train.py";
+            txtCommand.Text = "python python/train.py";
             txtCommand.Location = new Point(12, 160);
             txtCommand.Width = 296;
             Controls.Add(txtCommand);

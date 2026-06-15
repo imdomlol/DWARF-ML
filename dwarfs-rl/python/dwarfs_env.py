@@ -7,7 +7,7 @@ what to do + where, (7, 60, 40) = (action, x col, y row). action 0 is idle,
 1 dynamite, 2 wall, 3 to 6 a green arrow pointing up/right/down/left.
 
 mode, difficulty, seed, action_repeat and the reward knobs all get picked per
-env / per reset, see PROTOCOL.md for what they mean.
+env / per reset, see docs/PROTOCOL.md for what they mean.
 """
 
 import asyncio
@@ -89,7 +89,9 @@ class DwarfsEnv(gym.Env):
             "grid": gym.spaces.Box(0, 6, shape=(GRID_H, GRID_W), dtype=np.int32),
             "stats": gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32),
         })
-        # action, x column, y row. idle ignores the coordinates
+        # action, x column, y row. idle ignores the coordinates.
+        # 7 action types: 0 idle, 1 dynamite, 2 wall, 3-6 arrow up/right/down/left
+        # (matches docs/PROTOCOL.md and the mod's ApplyAction)
         self.action_space = gym.spaces.MultiDiscrete([7, GRID_W, GRID_H])
 
         self._bridge = _Bridge(port)

@@ -46,8 +46,8 @@ its small).
    `python python\fake_env.py`
 2. with steam running start `game-patched\Dwarfs.exe`
 3. the mod connects within a few seconds and the env takes over from there.
-   RESET starts a round, STEP drives it, see PROTOCOL.md for the full wire
-   format
+   RESET starts a round, STEP drives it, see [PROTOCOL.md](PROTOCOL.md) for the
+   full wire format
 
 a control panel window opens next to the game with live stats, a render toggle
 and a place to launch the training script from. set `DWARFS_BRIDGE_GUI=0` in
@@ -55,16 +55,18 @@ the environment if you dont want it.
 
 ## several instances at once
 
-each instance reads `DWARFS_BRIDGE_PORT` at boot. start one websocket server
-per port on the env side then launch the games a few seconds apart
+run one env worker per port and point each game at its worker with
+`DWARFS_BRIDGE_PORT`, launching the copies a few seconds apart
 
 ```powershell
 $env:DWARFS_BRIDGE_PORT = "8766"
 Start-Process game-patched\Dwarfs.exe
 ```
 
-`python\parallel_test.py N` drives N instances and reports combined
-throughput. more notes in PROTOCOL.md.
+`python\parallel_test.py N` drives N instances and reports combined throughput.
+see [PROTOCOL.md](PROTOCOL.md#running-several-instances-in-parallel) for the
+host/port env vars, why the launches are staggered, the per-port logs and the
+sizing rule of thumb.
 
 ## when somethings off
 

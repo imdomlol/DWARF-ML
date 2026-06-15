@@ -214,7 +214,11 @@ namespace DwarfsLoader
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
             while (dir != null)
             {
-                if (File.Exists(Path.Combine(dir.FullName, "PROTOCOL.md")))
+                // dwarfs-rl/ is the project root: the one dir holding both the
+                // mod and the loader. keyed off the source layout, not a doc
+                // file, so reorganizing docs/ can't break patching
+                if (Directory.Exists(Path.Combine(dir.FullName, "mod")) &&
+                    Directory.Exists(Path.Combine(dir.FullName, "loader")))
                     return dir.FullName;
                 dir = dir.Parent;
             }

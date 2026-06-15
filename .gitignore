@@ -1,2 +1,24 @@
-# Virtual Environments
-.venv
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# .NET build output (mod + loader)
+bin/
+obj/
+*.user
+.vs/
+
+# a local patched copy of the game, never commit game files
+game-patched/
+
+# editor
+.vscode/
+
+# Trained model artifacts (stable_baselines3 saves as .zip) — early stage, not uploading yet
+dwarfs_agent.zip
+*.zip
+
+# AI
+.claude

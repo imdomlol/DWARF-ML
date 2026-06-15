@@ -81,3 +81,17 @@ sizing rule of thumb.
 * if the game sits at the menu doing nothing the env hasnt sent RESET yet
 * headless training still counts as steam playtime and can pop achievements.
   yes really
+* your antivirus might flag or quarantine the loader, the mod dll or the patched
+  game. its unsigned code that rewrites a game exe and runs inside it, which is
+  exactly the shape of the stuff a scanner watches for, so a strict one like
+  bitdefender can grab it. its a false positive. whitelist the dwarfs-rl folder
+  and the game-patched folder and youre good. signing the binaries would fix it
+  properly but that needs a paid certificate
+* if the start training button in the panel itself trips the antivirus, just run
+  your training script from a terminal instead. the button was only launching it
+  for you, nothing more
+* feels slow, like its capped around real time? thats action_repeat sitting at 1,
+  every single frame is waiting on a full decision from your model. bump it (8 is
+  a good starting point) so one decision covers 8 frames and you get way more
+  game frames per inference. the gym env takes it as a constructor arg, or add
+  an "action_repeat" field to your RESET message

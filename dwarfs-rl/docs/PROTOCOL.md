@@ -51,6 +51,11 @@ RESET fields, all optional
   nothing
 * `invalid_action` gets subtracted whenever an action is refused (`action_ok`
   false). default 0, a small value like 0.05 teaches action legality faster
+* `hazard_penalty` gets subtracted for every new water or lava tile that spreads
+  in a step, so the agent gets punished for letting a flood run instead of
+  plugging it fast. default 0 (off). a sealed cave sitting still costs nothing,
+  only the active spread counts, and the map only gets scanned when this is non
+  zero so it stays free when off
 * `render` / `render_fps`. episodes start headless by default, pass render
   true (plus a render_fps like 60 if you want it watchable) to see the run.
   every RESET reapplies these so set them per episode, or use the RENDER

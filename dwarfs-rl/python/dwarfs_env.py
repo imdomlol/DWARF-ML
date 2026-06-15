@@ -82,13 +82,15 @@ class DwarfsEnv(gym.Env):
 
     def __init__(self, port=8765, mode="m5", difficulty="Easy",
                  action_repeat=8, death_penalty=1500.0, invalid_action=0.0,
-                 render=False, render_fps=0, game_exe=None, launch_delay=0.0):
+                 hazard_penalty=0.0, render=False, render_fps=0,
+                 game_exe=None, launch_delay=0.0):
         super().__init__()
         self.mode = mode
         self.difficulty = difficulty
         self.action_repeat = action_repeat
         self.death_penalty = death_penalty
         self.invalid_action = invalid_action
+        self.hazard_penalty = hazard_penalty
 
         self.observation_space = gym.spaces.Dict({
             "grid": gym.spaces.Box(0, 6, shape=(GRID_H, GRID_W), dtype=np.int32),
@@ -135,6 +137,7 @@ class DwarfsEnv(gym.Env):
                "action_repeat": self.action_repeat,
                "death_penalty": self.death_penalty,
                "invalid_action": self.invalid_action,
+               "hazard_penalty": self.hazard_penalty,
                "render": self._render,
                "render_fps": self._render_fps}
         if seed is not None:

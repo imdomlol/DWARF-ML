@@ -147,6 +147,23 @@ async def drive(ws):
     print(f"m15 reset: time_left={m15['time_left']} "
           f"({'ok' if m15['time_left'] > 50000 else 'WRONG MODE'})")
 
+    # hazard penalty: exercise the reset field and make sure stepping stays
+    # healthy with it on. whether a flood actually happens (and the penalty
+    # bites) depends on the map, so this reports rather than asserts
+    await reset(ws, mode="m5", difficulty="Easy", seed=42,
+                action_repeat=8, hazard_penalty=5.0)
+    worst = 0.0
+    steps = 0
+    for _ in range(1200):
+        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        state = json.loads(await ws.recv())
+        worst = min(worst, state["immediate_reward"])
+        steps += 1
+        if state["terminated"]:
+            break
+    print(f"hazard penalty: ran {steps} steps with the field on, worst step "
+          f"reward {worst:.1f} ({'flood penalized' if worst < -5 else 'no flood this map'})")
+
     print("sending QUIT, the game should close itself")
     await ws.send(json.dumps({"command": "QUIT"}))
     try:

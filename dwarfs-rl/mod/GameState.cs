@@ -186,6 +186,34 @@ namespace DwarfsMod
             catch { return 0; }
         }
 
+        // total tiles holding water or lava right now. a sealed reservoir is a
+        // fixed count, so what matters is the GROWTH of this between steps, thats
+        // the water/lava actively spreading. only gets scanned when the hazard
+        // penalty is switched on so it costs nothing otherwise
+        public static int HazardTiles(object game)
+        {
+            if (!Bind(game)) return 0;
+            try
+            {
+                object map = fGameMap.GetValue(game);
+                if (map == null) return 0;
+                int mapW = (int)fMapW.GetValue(map);
+                int mapH = (int)fMapH.GetValue(map);
+                var water = (ushort[,])fWater.GetValue(map);
+                var lava = (ushort[,])fLava.GetValue(map);
+                if (water == null || lava == null) return 0;
+                int count = 0;
+                for (int x = 0; x < mapW; x++)
+                    for (int y = 0; y < mapH; y++)
+                    {
+                        if (water[x, y] > 0) count++;
+                        if (lava[x, y] > 0) count++;
+                    }
+                return count;
+            }
+            catch { return 0; }
+        }
+
         public static int TimeLeft(object game)
         {
             if (!Bind(game)) return 0;

@@ -69,12 +69,14 @@ namespace DwarfsMod
         static int pendingSeed;
         static bool hasPendingSeed;
         static long lastScore;
+        static int lastHazardTiles;  // flooded tile count last step, for the spread penalty
 
         // reward shaping, set per episode from RESET so tuning happens on the
         // python side. losing the city before the timer costs death_penalty,
         // running out the clock is the natural end so that costs nothing
         static float rewardDeathPenalty = 1500f;
         static float rewardInvalidAction;
+        static float rewardHazard;  // charged per active water/lava front each step
 
         // the control panel reads these, the game thread writes them as replies
         // go out so theyre at most one step stale
@@ -233,6 +235,17 @@ namespace DwarfsMod
                     reward -= rewardInvalidAction;
                 if (terminated && timeLeft > 0)
                     reward -= rewardDeathPenalty; // died, didnt make the timer
+                // sting for water/lava actively spreading. count how many new
+                // flooded tiles showed up since last step, so a sealed cave costs
+                // nothing but a flood on the move racks it up til its walled off
+                if (rewardHazard != 0f)
+                {
+                    int hz = GameState.HazardTiles(game);
+                    int spread = hz - lastHazardTiles;
+                    lastHazardTiles = hz;
+                    if (spread > 0)
+                        reward -= rewardHazard * spread;
+                }
                 Send(BuildState(game, reward, terminated, false));
             }
 
@@ -294,6 +307,7 @@ namespace DwarfsMod
                     if (actionRepeat > 240) actionRepeat = 240;
                     rewardDeathPenalty = MiniJson.GetFloat(cmd, "death_penalty", 1500f);
                     rewardInvalidAction = MiniJson.GetFloat(cmd, "invalid_action", 0f);
+                    rewardHazard = MiniJson.GetFloat(cmd, "hazard_penalty", 0f);
 
                     // episodes run headless unless asked, watching is opt in.
                     // the panel checkbox can still flip it back on mid run
@@ -379,6 +393,7 @@ namespace DwarfsMod
             phase = Phase.Running;
             lastActionOk = true; // don't carry a stale flag into the new episode
             lastScore = GameState.Score(game);
+            lastHazardTiles = rewardHazard != 0f ? GameState.HazardTiles(game) : 0;
             GameState.LogNextGrid = true; // log mask coverage once per episode
             Send(BuildState(game, 0f, false, false));
         }

@@ -97,6 +97,7 @@ namespace DwarfsMod
 
         static bool fastClock;
         static MethodInfo suppressDraw;
+        static PropertyInfo piFixedStep, piInactiveSleep;
 
         // optional frame pacing, for watching at human speed. 0 = unlimited.
         // training wants this off; flip it on (60 = real time) to spectate or
@@ -149,6 +150,7 @@ namespace DwarfsMod
                 SuppressDraw(game);
             if (phase != Phase.Free)
             {
+                KeepFast(game);
                 Pace();
                 if (frame % 1800 == 0) // breadcrumbs in case of a silent death
                     Log("heartbeat: tick " + frame + ", state " + GameControl.GameStateId(game) +
@@ -436,6 +438,26 @@ namespace DwarfsMod
                 Log("fast clock on (fixed step + vsync off)");
             }
             catch (Exception e) { Log("fast clock failed: " + e.Message); }
+        }
+
+        // re-assert the throttle killers every frame. setting them once in
+        // FastClock wasnt always sticking, a backgrounded window would fall back
+        // to xnas default InactiveSleepTime and cap around 40fps, so just keep
+        // hammering them while an episode runs. cheap, two property sets a frame
+        static void KeepFast(object game)
+        {
+            try
+            {
+                if (piFixedStep == null)
+                {
+                    var t = game.GetType();
+                    piFixedStep = t.GetProperty("IsFixedTimeStep");
+                    piInactiveSleep = t.GetProperty("InactiveSleepTime");
+                }
+                if (piFixedStep != null) piFixedStep.SetValue(game, false, null);
+                if (piInactiveSleep != null) piInactiveSleep.SetValue(game, TimeSpan.Zero, null);
+            }
+            catch { }
         }
 
         static void SlowClock(object game)

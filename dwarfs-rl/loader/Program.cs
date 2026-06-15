@@ -118,8 +118,11 @@ namespace DwarfsLoader
             // lay out a runnable copy and write the patched exe into it
             PrepareFolder(gameDir, outDir);
             string outExe = Path.Combine(outDir, "Dwarfs.exe");
+            if (File.Exists(outExe))
+                File.SetAttributes(outExe, FileAttributes.Normal);
             game.Write(outExe);
-            File.Copy(modDll, Path.Combine(outDir, Path.GetFileName(modDll)), true);
+            File.SetAttributes(outExe, FileAttributes.Normal);
+            CopyOver(modDll, Path.Combine(outDir, Path.GetFileName(modDll)));
 
             Console.WriteLine("patched -> " + outExe);
             Verify(outExe);
@@ -149,7 +152,7 @@ namespace DwarfsLoader
             {
                 string name = Path.GetFileName(file);
                 if (string.Equals(name, "Dwarfs.exe", StringComparison.OrdinalIgnoreCase)) continue;
-                File.Copy(file, Path.Combine(outDir, name), true);
+                CopyOver(file, Path.Combine(outDir, name));
             }
         }
 
@@ -157,9 +160,20 @@ namespace DwarfsLoader
         {
             Directory.CreateDirectory(dest);
             foreach (var f in Directory.GetFiles(src))
-                File.Copy(f, Path.Combine(dest, Path.GetFileName(f)), true);
+                CopyOver(f, Path.Combine(dest, Path.GetFileName(f)));
             foreach (var d in Directory.GetDirectories(src))
                 CopyDir(d, Path.Combine(dest, Path.GetFileName(d)));
+        }
+
+        // steam marks a lot of its files read only, and File.Copy wont overwrite a
+        // read only target, so a second patch run used to die with access denied.
+        // clear the attribute around the copy so re-patching always works
+        static void CopyOver(string src, string dest)
+        {
+            if (File.Exists(dest))
+                File.SetAttributes(dest, FileAttributes.Normal);
+            File.Copy(src, dest, true);
+            File.SetAttributes(dest, FileAttributes.Normal);
         }
 
         static void Junction(string link, string target)

@@ -31,9 +31,10 @@ Python setup and run (also from `dwarfs-rl/`):
 ```
 pip install -r requirements.txt        # torch, gymnasium, stable_baselines3, websockets, numpy
 python python/train.py                       # PPO training (MultiInputPolicy)
+python python/train.py --instances 4         # train across 4 game instances at once
 python python/train.py --mode demo --render  # random-action demo with rendering
 ```
-`train.py` flags: `--mode train|demo`, `--timesteps N`, `--steps N`, `--render`, `--render-fps N`. It imports the env as `from dwarfs_env import DwarfsEnv` (same `python/` dir), so run it from `dwarfs-rl/` as shown.
+`train.py` flags: `--mode train|demo`, `--timesteps N`, `--steps N`, `--render`, `--render-fps N`, `--instances N` (spin up N games and train across them via SubprocVecEnv). It imports the env as `from dwarfs_env import DwarfsEnv` (same `python/` dir), so run it from `dwarfs-rl/` as shown.
 
 **Run order matters: start the Python side first** (it owns the WebSocket *server*; the mod is the *client* and connects to it, retrying every few seconds). Then launch `game-patched\Dwarfs.exe`.
 

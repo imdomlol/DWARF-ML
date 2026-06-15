@@ -55,8 +55,17 @@ the environment if you dont want it.
 
 ## several instances at once
 
-run one env worker per port and point each game at its worker with
-`DWARFS_BRIDGE_PORT`, launching the copies a few seconds apart
+running more than one game at a time is how you actually use the whole pc,
+roughly one game per core. easiest way is just a flag on the trainer, it spins
+up that many games itself (each headless, on its own port, staggered so they
+dont clash) and trains across all of them with a vectorized env
+
+```
+python python/train.py --instances 4
+```
+
+under the hood each game reads `DWARFS_BRIDGE_PORT` at boot, so you can also do
+it by hand, one env worker per port, launching the copies a few seconds apart
 
 ```powershell
 $env:DWARFS_BRIDGE_PORT = "8766"
@@ -90,8 +99,8 @@ sizing rule of thumb.
 * if the start training button in the panel itself trips the antivirus, just run
   your training script from a terminal instead. the button was only launching it
   for you, nothing more
-* feels slow, like its capped around real time? thats action_repeat sitting at 1,
-  every single frame is waiting on a full decision from your model. bump it (8 is
-  a good starting point) so one decision covers 8 frames and you get way more
-  game frames per inference. the gym env takes it as a constructor arg, or add
-  an "action_repeat" field to your RESET message
+* feels slow? the mod no longer caps the game when its window is backgrounded so
+  that 40fps thing is gone. if its still slow the bottleneck is your side now,
+  the model inference. run it on a gpu, keep action_repeat up (8 is a good start,
+  one decision covers 8 frames so fewer inferences per game frame), and use
+  --instances to spread the work over more cores

@@ -12,8 +12,11 @@ env / per reset, see docs/PROTOCOL.md for what they mean.
 
 import asyncio
 import json
+import os
 import queue
+import subprocess
 import threading
+import time
 
 import gymnasium as gym
 import numpy as np
@@ -53,6 +56,8 @@ class _Bridge:
         try:
             async for msg in ws:
                 self._inbox.put(msg)
+        except Exception:
+            pass  # game closed / quit, the connection dropping is expected
         finally:
             self._connected.clear()
             self._conn = None
@@ -77,7 +82,7 @@ class DwarfsEnv(gym.Env):
 
     def __init__(self, port=8765, mode="m5", difficulty="Easy",
                  action_repeat=8, death_penalty=1500.0, invalid_action=0.0,
-                 render=False, render_fps=0):
+                 render=False, render_fps=0, game_exe=None, launch_delay=0.0):
         super().__init__()
         self.mode = mode
         self.difficulty = difficulty
@@ -99,6 +104,20 @@ class DwarfsEnv(gym.Env):
         # so whatever you pick here sticks across episodes
         self._render = bool(render)
         self._render_fps = int(render_fps)
+
+        # if a game exe is handed in, this env launches and owns one game process
+        # on its own port. thats what lets a vec env be self contained, one game
+        # per worker and no control panel windows. the bridge server is already
+        # up above so the game connects the moment it boots
+        self._game = None
+        if game_exe:
+            if launch_delay > 0:
+                time.sleep(launch_delay)  # stagger so the steam_appid.txt writes dont clash
+            childenv = dict(os.environ)
+            childenv["DWARFS_BRIDGE_PORT"] = str(port)
+            childenv["DWARFS_BRIDGE_GUI"] = "0"
+            self._game = subprocess.Popen([game_exe],
+                                          cwd=os.path.dirname(game_exe), env=childenv)
 
     def _unpack(self, state):
         grid = np.asarray(state["map_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
@@ -145,3 +164,33 @@ class DwarfsEnv(gym.Env):
             self._bridge.send({"command": "QUIT"})
         except Exception:
             pass  # game already gone, fine
+        if self._game is not None:
+            try:
+                self._game.wait(timeout=8)  # QUIT should bring it down on its own
+            except Exception:
+                self._game.kill()
+            self._game = None
+
+
+def default_game_exe():
+    # game-patched sits next to python/ under dwarfs-rl/
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "..", "game-patched", "Dwarfs.exe")
+
+
+def make_vec_env(n, base_port=8765, stagger=4.0, game_exe=None, **kwargs):
+    # n game instances, each in its own subprocess env, all stepping together.
+    # this is what actually uses more of the pc, roughly one game per core. needs
+    # stable_baselines3. extra kwargs (mode, difficulty, action_repeat, reward
+    # weights) pass straight through to every DwarfsEnv
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+    if game_exe is None:
+        game_exe = default_game_exe()
+
+    def factory(i):
+        def _make():
+            return DwarfsEnv(port=base_port + i, game_exe=game_exe,
+                             launch_delay=i * stagger, **kwargs)
+        return _make
+
+    return SubprocVecEnv([factory(i) for i in range(n)])

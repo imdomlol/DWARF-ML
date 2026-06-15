@@ -4,9 +4,16 @@ from stable_baselines3 import PPO
 from dwarfs_env import DwarfsEnv
 
 
-def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0) -> None:
-	# The mod is expected to connect over websocket and provide observations/rewards.
-	env = DwarfsEnv(render=render, render_fps=render_fps)
+def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
+                instances: int = 1) -> None:
+	# The mod connects over websocket and provides observations/rewards.
+	# One instance attaches to a manually launched game; more than one spins up
+	# that many game processes and trains across all of them at once.
+	if instances > 1:
+		from dwarfs_env import make_vec_env
+		env = make_vec_env(instances, render=render, render_fps=render_fps)
+	else:
+		env = DwarfsEnv(render=render, render_fps=render_fps)
 	model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003)
 
 	print("Training the AI...")
@@ -45,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--steps", type=int, default=25, help="Steps to run when mode=demo.")
 	parser.add_argument("--render", action="store_true", help="Enable game rendering during training or demo.")
 	parser.add_argument("--render-fps", type=int, default=60, help="Render frame cap when --render is enabled.")
+	parser.add_argument("--instances", type=int, default=1, help="Game instances to train across at once.")
 	return parser
 
 
@@ -53,7 +61,8 @@ def main() -> None:
 	if args.mode == "demo":
 		demo_run(args.steps, render=args.render, render_fps=args.render_fps)
 	else:
-		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps)
+		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps,
+			instances=args.instances)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,11 @@ gold and the action gets refused (check `action_ok` in the reply).
 
 `RENDER` is for spectating. `enabled` toggles drawing and `max_fps` paces the
 frames (60 = real time, 120 = double speed, 0 or missing = unlimited).
-training runs with rendering off and no pacing.
+training runs with rendering off and no pacing. heads up, the pacing is
+independent of drawing, so a `max_fps` (or the RESET `render_fps`) bigger than 0
+throttles the sim even with rendering off. thats handy as a cpu governor (cap a
+headless run so the machine stays usable) but it also means you dont want a
+stray frame cap on a run you meant to be full speed.
 
 `QUIT` shuts the game down cleanly through its own exit path so the trainer
 doesnt have to kill the process.

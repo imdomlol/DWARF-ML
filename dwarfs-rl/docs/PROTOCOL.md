@@ -16,17 +16,32 @@ frame.
 { "command": "QUIT" }
 ```
 
-actions are `0` idle, `1` place dynamite, `2` place wall, `3` to `6` place a
-green arrow pointing up / right / down / left. arrows are what steers the
-dwarves so theyre the scoring tool, walls and dynamite are the defense. they
-cost 5 on easy, can sit on undug soil too and fade out after about a minute of
-game time. anything that targets a tile takes `x` / `y` in **window
-coordinates** (the same grid the observation shows, x is the column and y the
-row), the mod translates to map tiles using where the crop sits. placement
-runs through the same validation the games own click handlers use, wrong spot
-or occupied square or not enough gold and the action gets refused (check
-`action_ok` in the reply). the set can still grow, solidify / remove /
-outposts all exist in the game too.
+actions, the full set
+
+* `0` idle, coordinates ignored
+* `1` place dynamite
+* `2` place wall
+* `3` to `6` place a green arrow pointing up / right / down / left. arrows are
+  what steers the dwarves so theyre the main scoring tool, walls and dynamite
+  are the defense. they cost 5 on easy, can sit on undug soil too and fade out
+  after about a minute of game time
+* `7` place tower (an outpost). needs a clear discovered 7x7 of open ground and
+  enough gold, cant sit on the city. towers spawn and train warriors and diggers
+* `8` reinforce wall. the base game has no reinforce so this is defined as paying
+  the wall cost to patch a damaged wall at the tile back to full health. no wall
+  there or already full and it gets refused
+* `9` to `13` are tower actions, the tile picks which tower (anywhere in its 3x3
+  footprint). `9` toggle the digger spawner, `10` spawn a warrior (gold + max
+  warrior checks), `11` recall all that towers warriors, `12` cannon strike where
+  for this one the tile is the **target** to fire at (the mod picks a tower in
+  range with warriors home and lobs them at the spot), `13` toggle warrior
+  training
+
+anything that targets a tile takes `x` / `y` in **window coordinates** (the same
+grid the observation shows, x is the column and y the row), the mod translates to
+map tiles using where the crop sits. placement runs through the same validation
+the games own click handlers use, wrong spot or occupied square or not enough
+gold and the action gets refused (check `action_ok` in the reply).
 
 `RENDER` is for spectating. `enabled` toggles drawing and `max_fps` paces the
 frames (60 = real time, 120 = double speed, 0 or missing = unlimited).

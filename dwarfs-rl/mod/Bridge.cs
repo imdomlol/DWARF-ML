@@ -381,6 +381,35 @@ namespace DwarfsMod
                     if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
                     return GameAction.PlaceArrow(game,
                         GameState.LastCropX + x, GameState.LastCropY + y, action - 3);
+                case 7: // place tower (outpost)
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.PlaceOutpost(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                case 8: // reinforce wall, patch a damaged wall back to full
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.ReinforceWall(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                // outpost actions, the tile picks which tower
+                case 9: // toggle digger spawner
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.OutpostToggleDigger(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                case 10: // spawn warrior
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.OutpostSpawnWarrior(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                case 11: // recall all warriors
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.OutpostRecall(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                case 12: // cannon strike, tile is the target to fire at
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.OutpostCannon(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
+                case 13: // toggle warrior training
+                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
+                    return GameAction.OutpostToggleTrain(game,
+                        GameState.LastCropX + x, GameState.LastCropY + y);
                 default:
                     return false;
             }

@@ -3,8 +3,11 @@
 runs the websocket server the mod connects to and turns RESET/STEP into the
 standard gym api. observation is a dict, the 40x60 map window plus a small
 stats vector (gold, dwarves, time left, city hp). action is MultiDiscrete,
-what to do + where, (7, 60, 40) = (action, x col, y row). action 0 is idle,
-1 dynamite, 2 wall, 3 to 6 a green arrow pointing up/right/down/left.
+what to do + where, (14, 60, 40) = (action, x col, y row). action 0 is idle,
+1 dynamite, 2 wall, 3 to 6 a green arrow up/right/down/left, 7 place tower,
+8 reinforce wall, 9 to 13 are tower actions (toggle digger, spawn warrior,
+recall, cannon, toggle train). the tile picks the tower for 9 to 13, and for
+12 the cannon its the target to fire at. see docs/PROTOCOL.md for the rest.
 
 mode, difficulty, seed, action_repeat and the reward knobs all get picked per
 env / per reset, see docs/PROTOCOL.md for what they mean.
@@ -97,9 +100,11 @@ class DwarfsEnv(gym.Env):
             "stats": gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32),
         })
         # action, x column, y row. idle ignores the coordinates.
-        # 7 action types: 0 idle, 1 dynamite, 2 wall, 3-6 arrow up/right/down/left
-        # (matches docs/PROTOCOL.md and the mod's ApplyAction)
-        self.action_space = gym.spaces.MultiDiscrete([7, GRID_W, GRID_H])
+        # 14 action types: 0 idle, 1 dynamite, 2 wall, 3-6 arrow up/right/down/left,
+        # 7 place tower, 8 reinforce wall, 9-13 tower actions (toggle digger, spawn
+        # warrior, recall, cannon, toggle train). matches docs/PROTOCOL.md and the
+        # mod's ApplyAction
+        self.action_space = gym.spaces.MultiDiscrete([14, GRID_W, GRID_H])
 
         self._bridge = _Bridge(port)
         # episodes default to headless on the mod side, the reset carries these

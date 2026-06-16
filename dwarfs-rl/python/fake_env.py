@@ -129,6 +129,72 @@ async def drive(ws):
     if not arrow_at:
         print("arrow placement: FAILED everywhere")
 
+    # new actions: 7 place tower, 8 reinforce, 9 toggle digger, 10 spawn warrior,
+    # 11 recall, 12 cannon, 13 toggle train. a tower runs 250 on easy and we just
+    # spent down near there on the wall/dynamite/arrow, so idle a bit to let the
+    # dwarves dig some gold back up first, then try to plant one. all of this
+    # reports rather than asserts since it leans on game state (gold on hand, a
+    # tower existing, warriors being home)
+    for _ in range(8000):
+        if state["gold"] >= 300 or state["terminated"]:
+            break
+        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        state = json.loads(await ws.recv())
+    print(f"new actions: farmed up to gold={state['gold']} (a tower is 250 on easy)")
+
+    grid = state["map_grid"]
+    empties = [(c, r) for r in range(H) for c in range(W) if grid[r * W + c] == 1]
+    empties.sort(key=lambda p: (p[0] - 30) ** 2 + (p[1] - 20) ** 2)
+    tower_at = None
+    for cx, cy in empties[:150]:
+        if (cx, cy) in (wall_at, boom_at, arrow_at):
+            continue
+        gold_before = state["gold"]
+        await ws.send(json.dumps({"command": "STEP", "action": 7, "x": cx, "y": cy}))
+        state = json.loads(await ws.recv())
+        if state["action_ok"] and state["gold"] < gold_before:
+            print(f"tower built at ({cx},{cy}): gold {gold_before}->{state['gold']}")
+            tower_at = (cx, cy)
+            break
+    if not tower_at:
+        print(f"tower placement: none built (gold={state['gold']}, "
+              f"needs 250 and a clear 7x7 off the city)")
+
+    # if a tower went up, poke its toggles, a warrior buy and a recall. the tower
+    # fills a 3x3 so the same tile addresses it
+    if tower_at:
+        tx, ty = tower_at
+        for code, name in [(9, "toggle digger"), (13, "toggle train"),
+                           (10, "spawn warrior"), (11, "recall warriors")]:
+            gb = state["gold"]
+            await ws.send(json.dumps({"command": "STEP", "action": code,
+                                      "x": tx, "y": ty}))
+            state = json.loads(await ws.recv())
+            print(f"  {name} (action {code}): ok={state['action_ok']} "
+                  f"gold {gb}->{state['gold']}")
+
+        # cannon needs warriors sitting home and something to hit, neither is
+        # guaranteed right here, so this mostly proves the path runs without
+        # throwing. tile is the target, fire at the tower and a few squares off
+        for dx, dy in [(0, 0), (3, 0)]:
+            await ws.send(json.dumps({"command": "STEP", "action": 12,
+                                      "x": tx + dx, "y": ty + dy}))
+            state = json.loads(await ws.recv())
+            print(f"  cannon strike (action 12) at ({tx + dx},{ty + dy}): "
+                  f"ok={state['action_ok']}")
+
+    # reinforce should refuse a full health wall and an empty tile both
+    if wall_at:
+        await ws.send(json.dumps({"command": "STEP", "action": 8,
+                                  "x": wall_at[0], "y": wall_at[1]}))
+        state = json.loads(await ws.recv())
+        print(f"reinforce full wall: ok={state['action_ok']} "
+              f"({'refused, good' if not state['action_ok'] else 'UNEXPECTED PASS'})")
+    await ws.send(json.dumps({"command": "STEP", "action": 8, "x": 0, "y": 0}))
+    state = json.loads(await ws.recv())
+    print(f"reinforce empty tile: ok={state['action_ok']} "
+          f"({'refused, good' if not state['action_ok'] else 'UNEXPECTED PASS'})")
+
     # episode 2, same seed should give back the same map
     again = await reset(ws, mode="m5", difficulty="Easy", seed=42)
     same = again["map_grid"] == first["map_grid"]

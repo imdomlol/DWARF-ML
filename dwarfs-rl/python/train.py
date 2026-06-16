@@ -24,7 +24,7 @@ def resolve_power(level: str):
 
 
 def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
-		instances: int = None, power: str = None) -> None:
+		instances: int = None, power: str = None, invalid_action: float = 0.1) -> None:
 	# The mod connects over websocket and provides observations/rewards.
 	# One instance attaches to a manually launched game; more than one spins up
 	# that many game processes and trains across all of them at once.
@@ -45,11 +45,18 @@ def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 	# headless run would silently throttle training, so keep the two separate.
 	pace_fps = render_fps if render else throttle_fps
 
+	# invalid_action docks the reward whenever the game refuses a move, so the
+	# agent stops spamming walls/arrows where they cant go. 0 turns it off.
+	if invalid_action:
+		print(f"Invalid action penalty: {invalid_action} per refused move.")
+
 	if instances > 1:
 		from dwarfs_env import make_vec_env
-		env = make_vec_env(instances, render=render, render_fps=pace_fps)
+		env = make_vec_env(instances, render=render, render_fps=pace_fps,
+			invalid_action=invalid_action)
 	else:
-		env = DwarfsEnv(render=render, render_fps=pace_fps)
+		env = DwarfsEnv(render=render, render_fps=pace_fps,
+			invalid_action=invalid_action)
 	model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003)
 
 	print("Training the AI...")
@@ -95,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
 			"moderate = about half the cores, full speed; min = one throttled instance to stay out "
 			"of the way. Sets the instance count (unless --instances is given), a per game frame cap, "
 			"and PyTorch's thread count.")
+	parser.add_argument("--invalid-action", type=float, default=0.1,
+		help="Reward penalty per refused action (illegal placement, not enough gold, etc). "
+			"On by default to discourage spamming impossible moves; pass 0 to turn it off.")
 	return parser
 
 
@@ -104,7 +114,7 @@ def main() -> None:
 		demo_run(args.steps, render=args.render, render_fps=args.render_fps)
 	else:
 		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps,
-			instances=args.instances, power=args.power)
+			instances=args.instances, power=args.power, invalid_action=args.invalid_action)
 
 
 if __name__ == "__main__":

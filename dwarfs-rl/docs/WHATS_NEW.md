@@ -71,15 +71,3 @@ messed with the counts, 4 is about as fast as 7, past that the extra games just
 end up waiting on the trainer so they dont really add anything. id just run 4.
 and dont bother with the gpu, its an amd card so theres no cuda and the net is
 tiny anyway, cpu is fine.
-
-## stuff i need you to call
-
-* speed up time. looked into it and its not really an agent action, it doesnt
-  speed training up and forcing it warps the game, action_repeat already does the
-  real version. ok to drop it?
-* the arrow targeting, you want dwarf positions added to the obs for it? your
-  model so your call
-* reinforce, repair like i did or Solidify?
-
-all in TODO.md too. and no new libraries, nothing to install, just pull and
-rebuild.

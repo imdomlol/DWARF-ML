@@ -35,9 +35,10 @@ The project lives under [`dwarfs-rl/`](dwarfs-rl/):
   demo entrypoint, and `random_agent.py` runs it with random actions as a baseline;
   `fake_env.py`, `full_run.py` and `parallel_test.py` exercise the mod itself.
 - [dwarfs-rl/docs/](dwarfs-rl/docs/) — [SETUP.md](dwarfs-rl/docs/SETUP.md)
-  (install / build / patch / run) and [PROTOCOL.md](dwarfs-rl/docs/PROTOCOL.md)
+  (install / build / patch / run), [PROTOCOL.md](dwarfs-rl/docs/PROTOCOL.md)
   (the WebSocket wire format — source of truth for commands, replies and the
-  observation/action space).
+  observation/action space), and [WHATS_NEW.md](dwarfs-rl/docs/WHATS_NEW.md)
+  (the latest actions, the trainer power flag and what changed).
 
 ## Getting started
 

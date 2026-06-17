@@ -88,6 +88,7 @@ the required fields (the env indexes straight into them)
 ```jsonc
 {
   "map_grid": [0, 1, 2, ...],   // flattened 1d int grid, row major (40 rows x 60 cols)
+  "dwarf_grid": [0, 1, 0, ...], // same shape, where our dwarves are (see below)
   "immediate_reward": 5.0,      // score gained since the previous reply
   "terminated": false,          // episode hit a terminal state (time up / city dead)
   "truncated": false,           // reserved, the time limit counts as terminated
@@ -110,6 +111,14 @@ no xray. sealed caves are masked to plain soil til the dwarves actually break
 into them so the model sees exactly what a human sees, water and lava only
 become visible once discovered. mineral veins sitting in soil stay visible
 cause the game draws those in the walls for human players too.
+
+`dwarf_grid` is a second layer the same shape and crop as `map_grid`, marking
+where our own dwarves are sitting. `0` empty, `1` a regular (digger) dwarf, `2`
+a warrior, and a warrior wins the tile if both are on it. its a separate layer
+so a dwarf standing on a tile doesnt hide the terrain under it, and theres no
+fog masking here, you always see your own dwarves like a human does. this is
+what lets the model aim arrows at a dwarf instead of just somewhere on the map.
+enemies arent in here yet, only our dwarves.
 
 ## map size and the crop window
 

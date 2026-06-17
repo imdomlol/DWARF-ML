@@ -26,6 +26,7 @@ namespace DwarfsMod
         static FieldInfo fMapW, fMapH, fMap, fWater, fLava, fMinerals, fOverlay;
         static FieldInfo fTimeLeft, fCityPos, fCityHP;
         static FieldInfo fVecX, fVecY;
+        static FieldInfo fDwarfPos, fDwarfClass;
         static MethodInfo mGetScore;
         static FieldInfo fGold;
 
@@ -59,6 +60,11 @@ namespace DwarfsMod
                 Type tVec = fCityPos.FieldType; // Microsoft.Xna.Framework.Vector2
                 fVecX = tVec.GetField("X", Pub);
                 fVecY = tVec.GetField("Y", Pub);
+
+                // the dwarf layer reads each dwarfs tile and class off the list
+                Type tDwarf = fDwarfList.FieldType.GetGenericArguments()[0];
+                fDwarfPos = tDwarf.GetField("m_v2Position", Pub);
+                fDwarfClass = tDwarf.GetField("m_sClass", Pub);
 
                 Type tRes = fResources.FieldType;
                 fGold = tRes.GetField("m_iGold", Priv);
@@ -150,6 +156,37 @@ namespace DwarfsMod
                     (overlay != null ? overlay[x0 + w / 2, y0 + h / 2].ToString() : "n/a"));
             }
             return outGrid;
+        }
+
+        // a second layer the same size as ReadGrid marking where our dwarves
+        // are, 0 nobody, 1 a regular (digger), 2 a warrior, warrior wins if they
+        // share a tile. no fog masking, you always see your own dwarves. uses the
+        // crop origin from the last ReadGrid call so call this right after it
+        public static int[] ReadDwarfGrid(object game, int w, int h)
+        {
+            var outGrid = new int[w * h];
+            if (!Bind(game)) return outGrid;
+            try
+            {
+                var list = fDwarfList.GetValue(game) as IList;
+                if (list == null || fDwarfPos == null || fDwarfClass == null)
+                    return outGrid;
+                int x0 = LastCropX, y0 = LastCropY;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    object d = list[i];
+                    if (d == null) continue;
+                    object pos = fDwarfPos.GetValue(d);
+                    int dx = (int)(float)fVecX.GetValue(pos) - x0;
+                    int dy = (int)(float)fVecY.GetValue(pos) - y0;
+                    if (dx < 0 || dx >= w || dy < 0 || dy >= h) continue;
+                    int code = (string)fDwarfClass.GetValue(d) == "Warrior" ? 2 : 1;
+                    int idx = dy * w + dx;
+                    if (code > outGrid[idx]) outGrid[idx] = code;
+                }
+                return outGrid;
+            }
+            catch { return outGrid; }
         }
 
         public static int Gold(object game)

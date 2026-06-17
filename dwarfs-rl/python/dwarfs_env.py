@@ -1,8 +1,9 @@
 """gymnasium environment for the modded game, ready to train against.
 
 runs the websocket server the mod connects to and turns RESET/STEP into the
-standard gym api. observation is a dict, the 40x60 map window plus a small
-stats vector (gold, dwarves, time left, city hp). action is MultiDiscrete,
+standard gym api. observation is a dict, the 40x60 terrain window, a matching
+40x60 dwarf layer (where our units are) and a small stats vector (gold, dwarves,
+time left, city hp). action is MultiDiscrete,
 what to do + where, (14, 60, 40) = (action, x col, y row). action 0 is idle,
 1 dynamite, 2 wall, 3 to 6 a green arrow up/right/down/left, 7 place tower,
 8 reinforce wall, 9 to 13 are tower actions (toggle digger, spawn warrior,
@@ -95,8 +96,12 @@ class DwarfsEnv(gym.Env):
         self.invalid_action = invalid_action
         self.hazard_penalty = hazard_penalty
 
+        # grid is the terrain layer, dwarves is a matching layer marking our own
+        # units (0 none, 1 regular/digger, 2 warrior) so the model can see where
+        # they are not just how many. stats is the small scalar vector
         self.observation_space = gym.spaces.Dict({
             "grid": gym.spaces.Box(0, 6, shape=(GRID_H, GRID_W), dtype=np.int32),
+            "dwarves": gym.spaces.Box(0, 2, shape=(GRID_H, GRID_W), dtype=np.int32),
             "stats": gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32),
         })
         # action, x column, y row. idle ignores the coordinates.
@@ -128,12 +133,13 @@ class DwarfsEnv(gym.Env):
 
     def _unpack(self, state):
         grid = np.asarray(state["map_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
+        dwarves = np.asarray(state["dwarf_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
         stats = np.array([state["gold"], state["dwarves"],
                           state["time_left"], state["city_hp"]],
                          dtype=np.float32)
         info = {"score": state["score"], "action_ok": state["action_ok"],
                 "crop": (state["crop_x"], state["crop_y"]), "tick": state["tick"]}
-        return {"grid": grid, "stats": stats}, info
+        return {"grid": grid, "dwarves": dwarves, "stats": stats}, info
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

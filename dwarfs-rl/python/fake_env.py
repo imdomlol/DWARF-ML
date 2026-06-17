@@ -18,10 +18,13 @@ def describe(state, label):
     cells = state["map_grid"]
     seen = sorted(set(cells))
     nonzero = sum(1 for c in cells if c)
+    dwarf_cells = state.get("dwarf_grid", [])
+    dwarf_marks = sum(1 for c in dwarf_cells if c)
     print(f"{label}: gold={state.get('gold')} score={state.get('score')} "
           f"dwarves={state.get('dwarves')} time_left={state.get('time_left')} "
           f"city_hp={state.get('city_hp')} tick={state.get('tick')}")
     print(f"   grid: {nonzero}/{len(cells)} nonzero, values: {seen}")
+    print(f"   dwarf layer: {dwarf_marks} marked, values: {sorted(set(dwarf_cells))}")
 
 
 async def reset(ws, **kw):
@@ -49,6 +52,9 @@ async def drive(ws):
     dt = time.perf_counter() - t0
 
     describe(state, f"after {done} steps")
+    marks = sum(1 for c in state["dwarf_grid"] if c)
+    print(f"dwarf layer: {marks} tiles marked vs {state['dwarves']} live dwarves "
+          f"({'ok' if marks > 0 else 'EMPTY, dwarves not showing up'})")
     print(f"reward total: {rewards}")
     print(f"{done} steps in {dt:.2f}s = {done / dt:.0f} steps/s "
           f"({dt / done * 1000:.2f} ms per round trip)")

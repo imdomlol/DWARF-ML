@@ -20,11 +20,14 @@ def describe(state, label):
     nonzero = sum(1 for c in cells if c)
     dwarf_cells = state.get("dwarf_grid", [])
     dwarf_marks = sum(1 for c in dwarf_cells if c)
+    enemy_cells = state.get("enemy_grid", [])
+    enemy_marks = sum(1 for c in enemy_cells if c)
     print(f"{label}: gold={state.get('gold')} score={state.get('score')} "
           f"dwarves={state.get('dwarves')} time_left={state.get('time_left')} "
           f"city_hp={state.get('city_hp')} tick={state.get('tick')}")
     print(f"   grid: {nonzero}/{len(cells)} nonzero, values: {seen}")
     print(f"   dwarf layer: {dwarf_marks} marked, values: {sorted(set(dwarf_cells))}")
+    print(f"   enemy layer: {enemy_marks} marked, values: {sorted(set(enemy_cells))}")
 
 
 async def reset(ws, **kw):

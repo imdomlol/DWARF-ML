@@ -27,6 +27,7 @@ namespace DwarfsMod
         static FieldInfo fTimeLeft, fCityPos, fCityHP;
         static FieldInfo fVecX, fVecY;
         static FieldInfo fDwarfPos, fDwarfClass;
+        static FieldInfo fEnemyList, fEnemyPos, fEnemyCategory, fEnemyUnder, fEnemyStealth;
         static MethodInfo mGetScore;
         static FieldInfo fGold;
 
@@ -42,6 +43,7 @@ namespace DwarfsMod
                 fResources = g.GetField("resources", Priv);
                 fCity = g.GetField("xCity", Priv);
                 fDwarfList = g.GetField("lDwarf", Priv);
+                fEnemyList = g.GetField("lEnemy", Priv);
 
                 Type tMap = fGameMap.FieldType;
                 fMapW = tMap.GetField("playFieldWidth", Pub);
@@ -65,6 +67,14 @@ namespace DwarfsMod
                 Type tDwarf = fDwarfList.FieldType.GetGenericArguments()[0];
                 fDwarfPos = tDwarf.GetField("m_v2Position", Pub);
                 fDwarfClass = tDwarf.GetField("m_sClass", Pub);
+
+                // enemies the same way, plus the flags that say if the game is
+                // hiding it (underground or stealthed) so we dont xray
+                Type tEnemy = fEnemyList.FieldType.GetGenericArguments()[0];
+                fEnemyPos = tEnemy.GetField("m_v2Position", Pub);
+                fEnemyCategory = tEnemy.GetField("m_sEnemyCategory", Pub);
+                fEnemyUnder = tEnemy.GetField("m_bUnderGround", Pub);
+                fEnemyStealth = tEnemy.GetField("m_fStealthCounter", Pub);
 
                 Type tRes = fResources.FieldType;
                 fGold = tRes.GetField("m_iGold", Priv);
@@ -182,6 +192,40 @@ namespace DwarfsMod
                     if (dx < 0 || dx >= w || dy < 0 || dy >= h) continue;
                     int code = (string)fDwarfClass.GetValue(d) == "Warrior" ? 2 : 1;
                     int idx = dy * w + dx;
+                    if (code > outGrid[idx]) outGrid[idx] = code;
+                }
+                return outGrid;
+            }
+            catch { return outGrid; }
+        }
+
+        // enemy layer, same idea as the dwarf one, 0 none, 1 a minion, 2 a boss,
+        // boss wins a shared tile. we only mark the ones a human can actually see,
+        // the game hides enemies that are underground or fully stealthed
+        // (m_fStealthCounter >= 1000) so we skip those, no xray. also depends on
+        // the crop from the last ReadGrid call
+        public static int[] ReadEnemyGrid(object game, int w, int h)
+        {
+            var outGrid = new int[w * h];
+            if (!Bind(game)) return outGrid;
+            try
+            {
+                var list = fEnemyList.GetValue(game) as IList;
+                if (list == null || fEnemyPos == null || fEnemyCategory == null)
+                    return outGrid;
+                int x0 = LastCropX, y0 = LastCropY;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    object e = list[i];
+                    if (e == null) continue;
+                    if (fEnemyUnder != null && (bool)fEnemyUnder.GetValue(e)) continue;
+                    if (fEnemyStealth != null && (float)fEnemyStealth.GetValue(e) >= 1000f) continue;
+                    object pos = fEnemyPos.GetValue(e);
+                    int ex = (int)(float)fVecX.GetValue(pos) - x0;
+                    int ey = (int)(float)fVecY.GetValue(pos) - y0;
+                    if (ex < 0 || ex >= w || ey < 0 || ey >= h) continue;
+                    int code = (string)fEnemyCategory.GetValue(e) == "Boss" ? 2 : 1;
+                    int idx = ey * w + ex;
                     if (code > outGrid[idx]) outGrid[idx] = code;
                 }
                 return outGrid;

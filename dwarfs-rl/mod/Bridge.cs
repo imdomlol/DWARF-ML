@@ -579,9 +579,11 @@ namespace DwarfsMod
             var sb = new StringBuilder(ObsW * ObsH * 2 + 256);
             sb.Append("{\"map_grid\":");
             MiniJson.AppendIntArray(sb, GameState.ReadGrid(game, ObsW, ObsH));
-            // dwarf layer reads off the crop ReadGrid just set, keep it right after
+            // dwarf and enemy layers read off the crop ReadGrid just set, keep them right after
             sb.Append(",\"dwarf_grid\":");
             MiniJson.AppendIntArray(sb, GameState.ReadDwarfGrid(game, ObsW, ObsH));
+            sb.Append(",\"enemy_grid\":");
+            MiniJson.AppendIntArray(sb, GameState.ReadEnemyGrid(game, ObsW, ObsH));
             sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append(",\"terminated\":").Append(terminated ? "true" : "false");
             sb.Append(",\"truncated\":").Append(truncated ? "true" : "false");

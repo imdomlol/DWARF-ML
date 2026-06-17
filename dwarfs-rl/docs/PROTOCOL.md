@@ -89,6 +89,7 @@ the required fields (the env indexes straight into them)
 {
   "map_grid": [0, 1, 2, ...],   // flattened 1d int grid, row major (40 rows x 60 cols)
   "dwarf_grid": [0, 1, 0, ...], // same shape, where our dwarves are (see below)
+  "enemy_grid": [0, 0, 1, ...], // same shape, where the enemies we can see are
   "immediate_reward": 5.0,      // score gained since the previous reply
   "terminated": false,          // episode hit a terminal state (time up / city dead)
   "truncated": false,           // reserved, the time limit counts as terminated
@@ -118,7 +119,13 @@ a warrior, and a warrior wins the tile if both are on it. its a separate layer
 so a dwarf standing on a tile doesnt hide the terrain under it, and theres no
 fog masking here, you always see your own dwarves like a human does. this is
 what lets the model aim arrows at a dwarf instead of just somewhere on the map.
-enemies arent in here yet, only our dwarves.
+
+`enemy_grid` is the same kind of layer for the enemies, `0` none, `1` a minion,
+`2` a boss, boss wins a shared tile. enemies come from digging into a monster
+cave (every difficulty has them, easy caps at 7 minions). unlike the dwarves
+this one IS masked, we only mark enemies a human could actually see, the ones
+the game hides cause theyre tunneling underground or fully stealthed get left
+out so the model isnt xraying. all zeros til a cave gets cracked open.
 
 ## map size and the crop window
 

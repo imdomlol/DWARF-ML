@@ -197,6 +197,23 @@ def default_game_exe():
     return os.path.join(here, "..", "game-patched", "Dwarfs.exe")
 
 
+def kill_stray_games(game_exe=None):
+    # a run that crashed leaves its game processes alive; they keep retrying to
+    # connect and, on the next run, a leftover reconnects to a fresh worker's
+    # server *alongside* the freshly launched game. two games on one port wrecks
+    # the lockstep protocol (their replies interleave) and that worker fails with
+    # "no game connected" / never resets. so wipe the slate before launching. only
+    # used by the parallel path, which never wants a hand-launched game around.
+    name = os.path.basename(game_exe or default_game_exe())
+    try:
+        out = subprocess.run(["taskkill", "/F", "/IM", name],
+                             capture_output=True, text=True)
+        if out.returncode == 0:
+            print(f"cleared leftover {name} processes from a previous run")
+    except Exception:
+        pass  # nothing to kill / taskkill missing, not fatal
+
+
 def make_vec_env(n, base_port=8765, stagger=4.0, game_exe=None, **kwargs):
     # n game instances, each in its own subprocess env, all stepping together.
     # this is what actually uses more of the pc, roughly one game per core. needs
@@ -205,6 +222,7 @@ def make_vec_env(n, base_port=8765, stagger=4.0, game_exe=None, **kwargs):
     from stable_baselines3.common.vec_env import SubprocVecEnv
     if game_exe is None:
         game_exe = default_game_exe()
+    kill_stray_games(game_exe)  # clean slate so leftovers cant collide on a port
 
     def factory(i):
         def _make():

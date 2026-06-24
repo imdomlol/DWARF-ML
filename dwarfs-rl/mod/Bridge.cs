@@ -148,6 +148,8 @@ namespace DwarfsMod
         public static void BeforeUpdate(object game)
         {
             frame++;
+            // Path C feasibility spike, one shot, only when DWARFS_BRIDGE_C_SPIKE=1
+            MultiWorldSpike.MaybeRun(game);
             if (!rendering)
                 SuppressDraw(game);
             if (phase != Phase.Free)

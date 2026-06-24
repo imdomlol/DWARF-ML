@@ -152,6 +152,84 @@ GPU as a scaling axis. **Cons.** Largest change; depends entirely on how
 static-heavy the game is. Spike the "can `Game1` exist twice?" question before
 committing.
 
+**FEASIBILITY CONFIRMED 2026-06-24** (decompiled `Dwarfs.exe` + `DataTypes.dll`
+with ilspycmd). The static-heaviness question — the thing that could have killed
+this path — comes back clean, and better still the sim turns out to be GPU-free:
+
+- **`Game1` has zero static mutable state.** Its only `static` members are 4 pure
+  utility methods (`GetBytes`, `EncodeTo64`, `ParseVector`). All world state —
+  `xGameMap` (the `byte[,]`/`ushort[,]` grids), `resources`, `xCity`, `lDwarf`,
+  `lEnemy`, `randomizer`, `iGameState`, fade/difficulty — is **instance** state on
+  `Game1`. A world *is* a `Game1`.
+- **The whole game is nearly static-free.** Across all of `Dwarfs.exe` the only
+  static mutable fields are tower-cost config (effectively constants, correctly
+  shared) and two enemy-ID counters (`m_iBossIDPool` / `m_iMinionIDPool`, just
+  uniqueness). `DataTypes.dll` has no static fields at all. No global "current
+  game" singleton, no static map/RNG/content.
+- **The simulation is GPU-free.** `UpdateGamefield` (the core per-frame sim, 2295
+  lines) has **0** GraphicsDevice/Texture/spriteBatch references; `GenerateLevel`
+  is data-only except an *optional* tutorial-tips draw block (guarded by
+  `m_bShowTips`). All 2000+ GPU references live in `Draw`/`LoadContent`. `Draw` is
+  already suppressed headless.
+- **Entry point** (`Program.Main`): `new Game1(steamWrap, steamStats)` then
+  `game.Run()`. Steam is passed in, not static.
+
+**Implication — the target shifts from "one device, many worlds" to "many worlds,
+ZERO devices."** Since the sim needs no device, the real prize is M `Game1`
+instances that never create a graphics device at all, each pumped through
+`Update()` in lockstep — removing the GPU as a scaling axis completely (CPU/RAM
+bound). The remaining hard part is *not* the game's state model (it's clean) but
+the **XNA `Game` lifecycle**: `Game.Run()` does `Initialize`→`LoadContent` (which
+creates the real device) and a blocking loop, so a multi-world host has to drive
+`Update()` on M instances manually *and* stand in for the device/content that
+`Initialize`/`LoadContent` expect (this is where Path D — stub content — merges
+in; the sim reads no textures, so stubbing is low-risk, but the few draw-in-sim
+spots like the tips block must be guarded).
+
+**Open build risks / next step.** XNA resists being driven without `Run()` and
+without a device; the make-or-break spike is **"construct a second `Game1` in the
+same process and tick its `Update()` through a `GenerateLevel` + a few frames with
+no real device, see where it throws."** Also needs: the mod's `Bridge` made
+per-world (today its `phase`/`frame`/mailbox are static — one game assumed; the
+reflection helpers already take a `game` arg so they're fine), and the shared
+statics neutered (`Input` = human control, unused in training; `Timer` =
+profiling; Steam/audio = disable, audio is already null-guarded in `Update`).
+
+**SPIKE RUN 2026-06-24** (`mod/MultiWorldSpike.cs`, gated `DWARFS_BRIDGE_C_SPIKE=1`;
+constructs a second `Game1` from the running one's `Update` hook, reusing the
+primary's Steam wrappers, and drives it with no device). Result:
+
+```
+construct: OK -- a second Game1 exists in-process
+Initialize THREW: ContentLoadException: ... "Fonts\fontCodexCategory". GraphicsDevice component not found.
+GenerateLevel THREW: NullReferenceException
+Update #1 THREW: NullReferenceException
+UpdateGamefield (sim only): OK
+```
+
+- **A second `Game1` constructs cleanly in one process, and the primary keeps
+  running** (it survived the spike). XNA does *not* forbid two `Game` instances —
+  the biggest unknown is green.
+- **The only device dependency in bring-up is content loading.** `Initialize` dies
+  on its first line (`Content.Load<SpriteFont>`) with *"GraphicsDevice component
+  not found"* — the `ContentManager` wants an `IGraphicsDeviceService` in
+  `game.Services`. That is the entire wall, and it's exactly the Path D surface
+  (stub/skip content), not a fundamental blocker.
+- **`GenerateLevel`/`Update` threw only as collateral** — `Initialize` aborted, so
+  `xGameMap`/`xSoundSystem`/`Input` were never created; plain null cascades, not
+  independent device needs.
+- **`UpdateGamefield` ran deviceless without throwing** (it no-op'd with no built
+  world + `iGameState==0`, but did not crash on a missing device) — consistent
+  with the "0 GPU refs in the sim" finding.
+
+**Verdict: Path C's foundation is sound** — two worlds coexist in a process; the
+only thing between us and a deviceless world is the content-loading bring-up.
+**Next iteration:** manually stand up a minimal deviceless world (create
+`xGameMap` + a `xSoundSystem`, skip `Initialize`/`LoadContent`, call
+`GenerateLevel`, force `iGameState = 1`), tick `UpdateGamefield`, and verify the
+sim *actually advances* (dwarf count, map cells, timer) — proving a world can
+simulate with zero device before building the multi-world host + per-world `Bridge`.
+
 ## Path D — Skip content/texture/shader loads under headless
 
 **Idea.** Since obs comes from game data and Draw is suppressed, the textures and

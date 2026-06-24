@@ -34,6 +34,17 @@ target a race and back-buffer VRAM respectively — neither is our bottleneck. T
 go past ~2 instances we need the headless instances to stop holding a real
 hardware D3D9 device / full content set.
 
+### Cross-GPU data point (2026-06-24)
+
+Same code, same build: an **AMD RX 5700 (8 GB)** caps at ~2–3 instances; an
+**NVIDIA RTX 5070 (12 GB)** does ~6–7. The instance ratio (~2.5–3×) does **not**
+track the VRAM ratio (~1.5×), and the symptom is a *caps / device-creation* modal,
+not an out-of-VRAM error. That points away from "pure VRAM" and toward the **AMD
+legacy D3D9 driver** being the dominant limiter on this box — exactly what a
+d3d9→Vulkan layer (Path E) would bypass *if* it could be made to load. The
+per-process vs per-device question (open below) is therefore still live: the
+ceiling may be driver/device-count, not memory.
+
 ## Constraints any solution must respect
 
 - **XNA 3.1 / Direct3D 9**, .NET 3.5 game runtime. No D3D11/WARP available to the
@@ -158,48 +169,56 @@ assets `Update`/`GenerateLevel` actually read vs. which only `Draw` reads.
 demand; composes with Path A to make NULLREF viable. **Cons.** Fiddly; lots of
 "does the sim touch this asset?" spelunking. Medium-high effort.
 
-## Path E — DXVK / d3d9-to-Vulkan translation layer
+## Resolved — already tried or shipped (2026-06-24)
 
-**Idea.** Drop a `d3d9.dll` (DXVK) next to `game-patched\Dwarfs.exe` so D3D9
-calls run on Vulkan. Vulkan's per-process device model may lift the concurrent
-D3D9 ceiling, and DXVK is far more tolerant of many contexts.
+Off the to-try list; kept terse so the conclusions aren't re-derived. The full
+teardown of each is in git history.
 
-**Pros.** Possibly zero code change — just a DLL in the output folder; the loader
-already lays out `game-patched/`. **Cons.** Adds a redistributable dependency and
-a moving part; behavior on this exact XNA 3.1 title is unknown; may or may not
-change the ceiling. Cheap to **spike** (drop the DLL, launch 4), so worth an
-early empirical test even though it's inelegant.
+- **Path E (DXVK d3d9→Vulkan): ruled out for this game.** The "just drop a
+  `d3d9.dll` in the game folder" premise is false — it's a .NET process whose
+  runtime shim (`mscoreei.dll`) pins DLL resolution to System32
+  (`SetDefaultDllDirectories`) and disables DotLocal, so a `d3d9.dll` in the game
+  folder, via a `.local` marker, or next to `XnaNative.dll` is always ignored
+  (verified with Sysinternals ListDLLs on the live 32-bit process). An in-process
+  preload from the mod *does* load DXVK, but XnaNative loads d3d9 via a
+  System32-pinned path so XNA binds to the system copy anyway (two `d3d9.dll`
+  modules coexist; no `vulkan-1.dll`, no DXVK device). Only replacing
+  `SysWOW64\d3d9.dll` machine-wide forces takeover — too invasive to justify
+  (d3d9 is shared by Firefox/Steam/BlueStacks, needs protected-folder ACL changes,
+  and Steam must stay up for the game to boot). Net: DXVK *might* lift the ceiling
+  but there's **no low-risk way to inject it here**; a real attempt needs a
+  System32 swap or native `LoadLibraryExW` hooking from the mod.
 
-## Path F — Just probe & cap (not headless, but stops the bleeding)
-
-**Idea.** Not a true-headless path, but the safety net: a one-time preflight that
-launches instances until one fails, caches the max that fit, and caps
-`make_vec_env` to it so a run is never poisoned by dead instances. Recover lost
-throughput with higher `action_repeat`.
-
-**Use it as.** The fallback we ship regardless, so training is robust while the
-real headless paths (A/C/D) are still being proven out.
+- **Path F (probe & cap): shipped.** `python/headless_probe.py`
+  (`probe_max_instances`) brings instances up one at a time — each on its own port
+  clear of training's 8765, keeping prior ones alive so the simultaneous-device
+  ceiling is reproduced — and returns the count that all booted and completed a
+  RESET (a failed instance connects then freezes on the modal, so its `reset()`
+  times out — that's the ceiling signal). Wired into `train.py` as
+  **`--power max-safe`** (probes, then caps the run); standalone
+  `python python/headless_probe.py --max 8`. The always-on guardrail so a run is
+  never poisoned by dead instances while the real headless paths are proven out.
 
 ---
 
 ## Suggested order of attack
 
-1. **Path E spike** (DXVK drop-in) — an afternoon, possibly fixes it for free.
-2. **Path C feasibility** (can `Game1` exist twice / how static-heavy is the
-   sim?) — this is the highest-ceiling fix; answer the instantiability question
-   before investing anywhere else big.
-3. **Path A + D together** (NULLREF device *and* skip cap-demanding loads) — the
+Path E is ruled out and Path F is shipped (see Resolved). Remaining, in order:
+
+1. **Path C feasibility** (can `Game1` exist twice / how static-heavy is the
+   sim?) — the highest-ceiling fix worth pursuing; answer the instantiability
+   question before investing anywhere else big.
+2. **Path A + D together** (NULLREF device *and* skip cap-demanding loads) — the
    "stay one-process-per-instance but make the device free" route.
-4. **Path F** as the always-on guardrail.
-5. **Path B** only if A proves caps are the sole blocker and the DLL is
+3. **Path B** only if A proves caps are the sole blocker and the DLL is
    redistributable.
 
 ## How to measure / a probe harness
 
-- Add a tiny `python/headless_probe.py`: launch instances one at a time with a
-  chosen device mode env var, wait for each mod log to reach `reset complete`,
-  and report the max that come up + per-instance VRAM (via `nvidia-smi` /
-  `dxdiag` / GPU-Z). This turns "does path X raise the ceiling?" into a number.
+- `python/headless_probe.py` exists (Path F): it launches instances one at a time
+  and reports the max that come up healthy. To measure A/D, extend it to also log
+  per-instance VRAM (via `nvidia-smi` / `dxdiag` / GPU-Z) as each instance is
+  added — that turns "does path X raise the ceiling?" into a number.
 - Per-instance VRAM before/after is the headline metric for A/D; max-instances is
   the headline for C/E.
 - Confirm correctness, not just boot: a probed instance must pass `fake_env.py`

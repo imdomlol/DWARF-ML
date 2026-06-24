@@ -80,6 +80,11 @@ class _Bridge:
         self.send(payload)
         return json.loads(self._inbox.get(timeout=timeout))
 
+    @property
+    def connected(self):
+        # whether a game is currently attached (set on connect, cleared on drop)
+        return self._connected.is_set()
+
 
 class DwarfsEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
@@ -146,7 +151,7 @@ class DwarfsEnv(gym.Env):
         return {"grid": grid, "dwarves": dwarves, "enemies": enemies,
                 "stats": stats}, info
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None, timeout=None):
         super().reset(seed=seed)
         cmd = {"command": "RESET", "mode": self.mode,
                "difficulty": self.difficulty,
@@ -158,7 +163,10 @@ class DwarfsEnv(gym.Env):
                "render_fps": self._render_fps}
         if seed is not None:
             cmd["seed"] = int(seed)
-        state = self._bridge.request(cmd)
+        # timeout is optional so callers like the headless probe can bound how long
+        # they wait for a fresh game to come up (a failed one freezes on the
+        # device-creation modal and never replies); training leaves it at default
+        state = self._bridge.request(cmd, timeout=timeout or 120)
         obs, info = self._unpack(state)
         return obs, info
 
@@ -179,10 +187,14 @@ class DwarfsEnv(gym.Env):
                            "max_fps": self._render_fps})
 
     def close(self):
-        try:
-            self._bridge.send({"command": "QUIT"})
-        except Exception:
-            pass  # game already gone, fine
+        # only ask nicely if a game is actually attached; otherwise the QUIT send
+        # would block waiting up to 60s for a connection that never comes (e.g. a
+        # probe instance that failed device creation), so go straight to the kill
+        if self._bridge.connected:
+            try:
+                self._bridge.send({"command": "QUIT"})
+            except Exception:
+                pass  # game already gone, fine
         if self._game is not None:
             try:
                 self._game.wait(timeout=8)  # QUIT should bring it down on its own

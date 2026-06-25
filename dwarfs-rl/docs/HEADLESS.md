@@ -224,11 +224,66 @@ UpdateGamefield (sim only): OK
 
 **Verdict: Path C's foundation is sound** — two worlds coexist in a process; the
 only thing between us and a deviceless world is the content-loading bring-up.
-**Next iteration:** manually stand up a minimal deviceless world (create
-`xGameMap` + a `xSoundSystem`, skip `Initialize`/`LoadContent`, call
-`GenerateLevel`, force `iGameState = 1`), tick `UpdateGamefield`, and verify the
-sim *actually advances* (dwarf count, map cells, timer) — proving a world can
-simulate with zero device before building the multi-world host + per-world `Bridge`.
+
+**The build pattern (validated by the spikes below).** Skip the device-coupled
+`Initialize`/`LoadContent` on the extra worlds; instead one real `Game1` (the
+"host") initializes normally and owns the single device/content, and each extra
+world is a `Game1` that **clones the host's fields** (sharing the device, sprite
+batch, sound, textures, fonts) but then **reallocates its own per-world state** —
+a fresh `xGameMap`, fresh copies of every `List<>` field (the ~25 entity lists),
+fresh `xDifficulty`/`xTowerDefense`/`xPlayerInteraction`/`randomizer` — and lets
+the game's own `SetDifficulty` → `ClearGame` → `GenerateLevel` build the world.
+Per frame, tick the real arcade `Update` sequence: `resources.CheckTheAccount` →
+`UpdateGamefield` → `NonSpeedEvents` → `UpdateDynamicMaps` → `Update_CampaignQuests`
+→ `resources.BalanceTheAccount`.
+
+**SPIKE PROGRESSION 2026-06-24 → 06-25 (`mod/MultiWorldSpike.cs`, gated
+`DWARFS_BRIDGE_C_SPIKE=1`), all run from the primary's `Update` hook:**
+
+- **Single world, full episode.** A second world built this way ran ~15k frames to
+  the game's own end state (`gamestate=2`), no crash, with deterministic clock,
+  dwarves spawning (0→8) and score climbing (0→4145).
+- **Two worlds, rigorous isolation + economy.** Build two worlds with *different*
+  seeds and run them interleaved; then prove non-interference by running one seed
+  **solo** vs the **same seed paired** with a different-seed world:
+
+  ```
+  SOLO  (seed 111, alone)  -> score=1040 dwarves=4 gold=1105 timeLeft=12900 mapFP=274683
+  A     (seed 111, paired) -> score=1040 dwarves=4 gold=1105 timeLeft=12900 mapFP=274683
+  B     (seed 222, paired) -> score=215  dwarves=4 gold=293  timeLeft=12900 mapFP=238259
+  ```
+
+  A (paired) is **byte-identical** to SOLO — score, dwarves, gold, *and* map
+  fingerprint — so the second world had **zero** effect on the first. That is
+  isolation proven *and* full per-seed determinism (needed for reproducible RL).
+  A vs B (different seeds) diverge cleanly. Economy runs (`gold` 250 → 1105).
+
+**Recalibrated status — every "will it work?" unknown is retired with running code:**
+
+| Question | Status |
+|---|---|
+| >1 `Game1` in one process | ✅ proven |
+| Device-free sim runs a full episode | ✅ proven |
+| Two worlds **isolated** (zero cross-talk) | ✅ proven (solo == paired, exact) |
+| Deterministic per seed | ✅ proven |
+| Economy fidelity | ✅ running |
+| Enemy/combat path | ⏸ deferred (rare monster caves; needs a long game, not a spike) |
+| Obs/reward match the real single-instance env | ❌ not yet compared |
+| Product: host loop + per-world `Bridge` + Python M-ports | ❌ to build |
+
+**Remaining work (engineering, no more big unknowns):**
+1. **Bring-up host.** One real `Game1` initializes normally (device owner); the
+   extra M-1 worlds are constructed + seeded with the shared infra as above.
+2. **Multi-world host + per-world `Bridge`.** Drive M worlds' sim in lockstep, each
+   with its own port/mailbox. Today `Bridge`'s `phase`/`frame`/mailbox are static
+   (one game assumed); make them per-world keyed by the `Game1` instance. The
+   reflection helpers (`GameState`/`GameControl`/`GameAction`) already take a
+   `game` arg, so they're multi-world ready.
+3. **Correctness check.** Wire one multi-world `Game1` to the real `Bridge` and run
+   `fake_env.py` against it — confirm obs/reward match a normal single-instance
+   game before trusting it for training.
+4. **Python side.** One process exposes M ports; `make_vec_env` connects M workers
+   to it. Removes the GPU as a scaling axis entirely.
 
 ## Path D — Skip content/texture/shader loads under headless
 

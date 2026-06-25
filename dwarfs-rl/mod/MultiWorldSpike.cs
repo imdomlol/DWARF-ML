@@ -1,26 +1,34 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 
 namespace DwarfsMod
 {
-    // Path C feasibility spike (docs/HEADLESS.md). Gated by DWARFS_BRIDGE_C_SPIKE=1,
-    // runs once. Once the primary game is up, try to stand up a SECOND Game1 in the
-    // same process with NO real graphics device and drive it through
-    // Initialize -> GenerateLevel -> a few Update() frames -> UpdateGamefield,
-    // logging exactly where each step throws.
+    // Path C feasibility spike (docs/HEADLESS.md). Gated by DWARFS_BRIDGE_C_SPIKE=1.
     //
-    // What we already know from the decompile: the world data (resources, xCity,
-    // lDwarf, lEnemy, xDifficulty) is field-initialized so it exists right after
-    // construction; xGameMap / xSoundSystem / Input are set up in
-    // Initialize/LoadContent, which need a device. The sim itself (UpdateGamefield)
-    // touches no device. The open questions this answers empirically:
-    //   1. does XNA even let a second Game exist in one process?
-    //   2. how far does a deviceless world get before it needs the device/content
-    //      we want to skip (i.e. exactly what Path D would have to stub)?
+    // Proves out the two hard unknowns with running code: (1) multiple Game1 in one
+    // process, (2) ISOLATION. Each world is built by cloning the primary's infra
+    // (one shared device/sound/textures) then reallocating its own per-world
+    // collections (fresh xGameMap, every List<> field, xDifficulty/randomizer) so
+    // nothing mutable is shared; ClearGame/GenerateLevel rebuild the rest.
+    //
+    // The per-frame tick is now the REAL Update sequence for an active arcade round,
+    // economy included: resources.CheckTheAccount -> UpdateGamefield -> NonSpeedEvents
+    // -> UpdateDynamicMaps -> Update_CampaignQuests -> resources.BalanceTheAccount.
+    // (Enemy combat is left out on purpose: monster caves are rare, so a dwarf
+    // reliably digging into one needs a far longer game than a spike.)
+    //
+    // Isolation is checked rigorously: a world run SOLO with a given seed must
+    // produce the IDENTICAL trajectory when run PAIRED alongside a different-seed
+    // world. Same outcome whether alone or not == zero cross-talk.
     public static class MultiWorldSpike
     {
         const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        const BindingFlags Pub = BindingFlags.Public | BindingFlags.Instance;
+        const int Frames = 6000;
         static bool ran;
+
+        struct Snap { public long score, mapFP; public int dwarves, gold, timeLeft, cityHP; }
 
         public static void MaybeRun(object primaryGame)
         {
@@ -33,111 +41,159 @@ namespace DwarfsMod
 
         static void Run(object primary)
         {
-            Log("==== Path C spike: second deviceless Game1 ====");
-            Type tGame = primary.GetType();
-            Log("game type: " + tGame.FullName);
-
-            // reuse the primary's steam wrappers so we don't trip over null Steam
+            Log("==== Path C spike: economy + rigorous isolation ====");
+            Type t = primary.GetType();
             object wrap = ReadField(primary, "_xSteamWrap");
             object stats = ReadField(primary, "_xSteamStats");
-            Log("primary steam: wrap=" + (wrap != null) + " stats=" + (stats != null));
+            ConstructorInfo ctor = FindTwoArgCtor(t);
 
-            // 1. can a second Game1 even be constructed in-process?
-            object game2;
+            // per-frame sim sequence (Game1 methods)
+            string[] seq = { "UpdateGamefield", "NonSpeedEvents", "UpdateDynamicMaps", "Update_CampaignQuests" };
+            MethodInfo[] sim = new MethodInfo[seq.Length];
+            for (int i = 0; i < seq.Length; i++) sim[i] = t.GetMethod(seq[i], Any, null, Type.EmptyTypes, null);
+            // economy methods (on the per-world Resources object)
+            FieldInfo fRes = t.GetField("resources", Any);
+            Type tRes = fRes.FieldType;
+            MethodInfo mCheck = tRes.GetMethod("CheckTheAccount", Any, null, Type.EmptyTypes, null);
+            MethodInfo mBalance = tRes.GetMethod("BalanceTheAccount", Any, null, Type.EmptyTypes, null);
+            Log("economy hooks: CheckTheAccount=" + (mCheck != null) + " BalanceTheAccount=" + (mBalance != null));
+
+            // Phase 1: SOLO world, seed 111
+            object solo = BuildWorld(primary, t, ctor, wrap, stats, 111, "SOLO");
+            for (int f = 0; f < Frames; f++) Tick(solo, sim, fRes, mCheck, mBalance);
+            Snap soloEnd = Snapshot(solo);
+            Log("SOLO  (seed 111, alone)  -> " + Fmt(soloEnd));
+
+            // Phase 2: PAIRED, A=seed 111 (same as solo) + B=seed 222, interleaved
+            object a = BuildWorld(primary, t, ctor, wrap, stats, 111, "A");
+            object b = BuildWorld(primary, t, ctor, wrap, stats, 222, "B");
+            string err = null;
+            int frame = 0;
+            for (; frame < Frames; frame++)
+            {
+                try { Tick(a, sim, fRes, mCheck, mBalance); Tick(b, sim, fRes, mCheck, mBalance); }
+                catch (Exception e) { err = Flatten(e); break; }
+            }
+            if (err != null) { Log("paired run THREW at frame " + frame + ": " + err); return; }
+            Snap aEnd = Snapshot(a), bEnd = Snapshot(b);
+            Log("A     (seed 111, paired) -> " + Fmt(aEnd));
+            Log("B     (seed 222, paired) -> " + Fmt(bEnd));
+
+            // verdicts
+            bool isolated = aEnd.score == soloEnd.score && aEnd.dwarves == soloEnd.dwarves
+                && aEnd.mapFP == soloEnd.mapFP && aEnd.gold == soloEnd.gold;
+            Log("ISOLATION PROOF: A(paired) " + (isolated ? "== " : "!= ") + "SOLO (same seed) -> "
+                + (isolated ? "identical trajectory, B had ZERO effect on A -- isolation proven"
+                            : "trajectories differ -- cross-contamination!"));
+            bool diverged = aEnd.mapFP != bEnd.mapFP && aEnd.score != bEnd.score;
+            Log("DIVERGENCE: A vs B (different seeds) " + (diverged ? "differ -- independent worlds" : "match -- suspicious"));
+            bool economy = soloEnd.gold != 250 || aEnd.gold != 250;
+            Log("ECONOMY: gold solo=" + soloEnd.gold + " A=" + aEnd.gold + " (start 250) -> "
+                + (economy ? "running" : "still frozen"));
+            Log("==== Path C spike: done ====");
+        }
+
+        static void Tick(object g, MethodInfo[] sim, FieldInfo fRes, MethodInfo mCheck, MethodInfo mBalance)
+        {
+            object res = fRes.GetValue(g);
+            if (res != null && mCheck != null) mCheck.Invoke(res, null);
+            for (int i = 0; i < sim.Length; i++) if (sim[i] != null) sim[i].Invoke(g, null);
+            if (res != null && mBalance != null) mBalance.Invoke(res, null);
+        }
+
+        static object BuildWorld(object primary, Type t, ConstructorInfo ctor,
+                                 object wrap, object stats, int seed, string tag)
+        {
+            object g = ctor.Invoke(new object[] { wrap, stats });
+            // share the primary's infrastructure
+            foreach (FieldInfo fi in t.GetFields(Any)) { try { fi.SetValue(g, fi.GetValue(primary)); } catch { } }
+            // isolate: own copy of every List<> field
+            foreach (FieldInfo fi in t.GetFields(Any))
+            {
+                Type ft = fi.FieldType;
+                if (ft.IsGenericType && ft.GetGenericTypeDefinition() == typeof(List<>))
+                    try { fi.SetValue(g, Activator.CreateInstance(ft)); } catch { }
+            }
+            ReallocFresh(g, t, "xTowerDefense");
+            ReallocFresh(g, t, "xPlayerInteraction");
+            ReallocFresh(g, t, "xDifficulty");
+            FieldInfo fMap = t.GetField("xGameMap", Any);
+            fMap.SetValue(g, fMap.FieldType.GetConstructor(new[] { typeof(int), typeof(int) }).Invoke(new object[] { 1000, 1000 }));
+            t.GetMethod("SetDifficulty", Any, null, new[] { typeof(string) }, null).Invoke(g, new object[] { "Easy" });
+            object diff = t.GetField("xDifficulty", Any).GetValue(g);
+            FieldInfo en = diff.GetType().GetField("m_enTime", Pub);
+            en.SetValue(diff, Enum.ToObject(en.FieldType, 0));
+            t.GetField("randomizer", Any).SetValue(g, new Random(seed));
+            Invoke(g, "ClearGame", tag);
+            t.GetField("randomizer", Any).SetValue(g, new Random(seed));
+            Invoke(g, "GenerateLevel", tag);
+            t.GetField("iGameState", Any).SetValue(g, 1);
+            t.GetField("iMainMenu", Any).SetValue(g, 0);
+            return g;
+        }
+
+        static Snap Snapshot(object g)
+        {
+            Snap s = default(Snap);
             try
             {
-                ConstructorInfo ctor = FindTwoArgCtor(tGame);
-                if (ctor == null) { Log("construct: no 2-arg ctor found, abort"); return; }
-                game2 = ctor.Invoke(new object[] { wrap, stats });
-                Log("construct: OK -- a second Game1 exists in-process");
+                s.score = GameState.Score(g);
+                s.dwarves = GameState.DwarfCount(g);
+                s.gold = GameState.Gold(g);
+                s.timeLeft = GameState.TimeLeft(g);
+                s.cityHP = GameState.CityHP(g);
+                int[] grid = GameState.ReadGrid(g, 60, 40);
+                long fp = 0; for (int i = 0; i < grid.Length; i++) fp += (long)(i + 1) * grid[i];
+                s.mapFP = fp;
             }
-            catch (Exception e) { Log("construct THREW (XNA may forbid two Games): " + Flatten(e)); return; }
+            catch { }
+            return s;
+        }
 
-            // 2. Initialize (expected to reach the device via Content.Load fonts)
-            InvokeNoArg(game2, "Initialize", "Initialize");
-
-            // 3. GenerateLevel (data per the decompile, but assumes xGameMap/xSoundSystem)
-            InvokeNoArg(game2, "GenerateLevel", "GenerateLevel");
-
-            // 4. tick Update() a few frames
-            object gameTime;
-            MethodInfo mUpdate = FindUpdate(tGame, out gameTime);
-            if (mUpdate == null) { Log("Update: method not found, skipping ticks"); }
-            else
-            {
-                for (int i = 0; i < 3; i++)
-                {
-                    try { mUpdate.Invoke(game2, new object[] { gameTime }); Log("Update #" + (i + 1) + ": OK"); }
-                    catch (Exception e) { Log("Update #" + (i + 1) + " THREW: " + Flatten(e)); break; }
-                }
-            }
-
-            // 5. the sim in isolation -- the part the decompile says needs no device
-            InvokeNoArg(game2, "UpdateGamefield", "UpdateGamefield (sim only)");
-
-            Log("==== Path C spike: done ====");
+        static string Fmt(Snap s)
+        {
+            return "score=" + s.score + " dwarves=" + s.dwarves + " gold=" + s.gold
+                + " timeLeft=" + s.timeLeft + " cityHP=" + s.cityHP + " mapFP=" + s.mapFP;
         }
 
         // ---- reflection helpers ----
 
+        static void ReallocFresh(object g, Type t, string name)
+        {
+            try
+            {
+                FieldInfo f = t.GetField(name, Any);
+                if (f == null) return;
+                ConstructorInfo c = f.FieldType.GetConstructor(Type.EmptyTypes);
+                if (c != null) f.SetValue(g, c.Invoke(null));
+            }
+            catch { }
+        }
+
         static ConstructorInfo FindTwoArgCtor(Type t)
         {
-            foreach (ConstructorInfo c in t.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            foreach (ConstructorInfo c in t.GetConstructors(Any))
                 if (c.GetParameters().Length == 2) return c;
             return null;
         }
 
-        static MethodInfo FindUpdate(Type t, out object gameTime)
-        {
-            gameTime = null;
-            MethodInfo mUpdate = null;
-            foreach (MethodInfo m in t.GetMethods(Any))
-                if (m.Name == "Update" && m.GetParameters().Length == 1) { mUpdate = m; break; }
-            if (mUpdate == null) return null;
-            Type tGameTime = mUpdate.GetParameters()[0].ParameterType;
-            try { gameTime = Activator.CreateInstance(tGameTime); }
-            catch
-            {
-                // fall back to a TimeSpan-based ctor if GameTime has no default one
-                foreach (ConstructorInfo c in tGameTime.GetConstructors())
-                {
-                    ParameterInfo[] ps = c.GetParameters();
-                    bool allTimeSpan = ps.Length > 0;
-                    foreach (ParameterInfo p in ps) if (p.ParameterType != typeof(TimeSpan)) allTimeSpan = false;
-                    if (allTimeSpan)
-                    {
-                        object[] args = new object[ps.Length];
-                        for (int i = 0; i < ps.Length; i++) args[i] = TimeSpan.Zero;
-                        try { gameTime = c.Invoke(args); break; } catch { }
-                    }
-                }
-            }
-            return mUpdate;
-        }
-
-        static void InvokeNoArg(object obj, string name, string label)
+        static void Invoke(object obj, string name, string tag)
         {
             try
             {
                 MethodInfo m = obj.GetType().GetMethod(name, Any, null, Type.EmptyTypes, null);
-                if (m == null) { Log(label + ": method not found"); return; }
+                if (m == null) { Log(tag + " " + name + ": not found"); return; }
                 m.Invoke(obj, null);
-                Log(label + ": OK");
             }
-            catch (Exception e) { Log(label + " THREW: " + Flatten(e)); }
+            catch (Exception e) { Log(tag + " " + name + " THREW: " + Flatten(e)); }
         }
 
         static object ReadField(object obj, string name)
         {
-            try
-            {
-                FieldInfo f = obj.GetType().GetField(name, Any);
-                return f == null ? null : f.GetValue(obj);
-            }
+            try { FieldInfo f = obj.GetType().GetField(name, Any); return f == null ? null : f.GetValue(obj); }
             catch { return null; }
         }
 
-        // unwrap reflection wrappers down to the real exception + a few stack frames
         static string Flatten(Exception e)
         {
             while (e is TargetInvocationException && e.InnerException != null) e = e.InnerException;

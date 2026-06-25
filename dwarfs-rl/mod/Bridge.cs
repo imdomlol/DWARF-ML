@@ -2,21 +2,27 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
-using System.Text;
 using System.Threading;
 
 namespace DwarfsMod
 {
-    // everything the game calls into lives here. the loader weaves calls to these
-    // static methods into Dwarfs.exe, the entry point plus the update, input,
-    // draw and level gen methods. the mod never references the game or xna
-    // directly, everything goes through reflection at runtime so the build doesnt
-    // need any of the game dlls.
+    // the loader weaves calls to these static methods into Dwarfs.exe, the entry
+    // point plus the update, input, draw and level gen methods. the mod never
+    // references the game or xna directly, everything goes through reflection at
+    // runtime so the build doesnt need any of the game dlls.
     //
-    // how the wire works. the python gym env runs a websocket server on
-    // localhost:8765 and we connect to it. env sends RESET / STEP / RENDER and
-    // every state reply has map_grid, immediate_reward, terminated and truncated
-    // in it.
+    // Bridge is the coordinator. the actual lockstep/episode/reward/socket state
+    // lives per world in World; one World wraps each Game1 instance and talks to
+    // one env worker. Bridge keeps the registry of worlds keyed by Game1 instance,
+    // routes the woven hooks to the right world, and owns the things that belong
+    // to the single real window/device (the rendering toggle, the clock knobs,
+    // draw suppression, frame pacing). today there is one world, the host; the
+    // multi-world host loop (Path C) will build M-1 more and tick them by calling
+    // World.Update() directly.
+    //
+    // how the wire works. the python gym env runs a websocket server per port and
+    // each world connects to its own. env sends RESET / STEP / RENDER and every
+    // state reply has map_grid, immediate_reward, terminated and truncated in it.
     //
     // timing wise the games sim is purely frame based, Update() never even reads
     // the clock, so the env is basically the clock. RESET drives the game into a
@@ -31,84 +37,19 @@ namespace DwarfsMod
         static int port = 8765;
         static string logPath = Path.Combine(Path.GetTempPath(), "dwarfs_mod.log");
 
-        // give up on lockstep if the env goes quiet for this long, that way a dead
-        // trainer hands the game back instead of freezing it forever
-        const int CommandTimeoutMs = 120000;
+        // worlds keyed by their Game1 instance. only touched on the game thread
+        // (the woven hooks and, later, the multi-world loop all run there) so no
+        // lock needed. hostWorld is the one XNA actually runs through Game.Run and
+        // the one the control panel reports on
+        static readonly Dictionary<object, World> worlds = new Dictionary<object, World>();
+        static World hostWorld;
 
-        // a resets fade transition normally lands in like 16 frames once the game
-        // is on the menu but at boot theres intro screens to ride out first
-        const int ResetTimeoutFrames = 7200;
-        const int ForceMenuAfterFrames = 600;
-
-        // observation crop around the city. doms env expects 40 rows x 60 cols
-        // and the real playfield is 500x500+ so we were gonna crop anyway
-        const int ObsW = 60;
-        const int ObsH = 40;
-
-        enum Phase { Free, Resetting, Running }
-
-        static long frame;
+        // the single window/device renders unless an episode asks for headless.
+        // one real device so this is host-level, not per world
         static volatile bool rendering = true;
-
-        // single slot mailbox, the env is strictly lockstep so theres never more
-        // than one command in flight
-        static readonly object gate = new object();
-        static Dictionary<string, object> mailbox;
-        static bool envConnected;
-
-        static Phase phase = Phase.Free;
-        static int stepFramesLeft;    // frames left before the current STEP replies
-        static int actionRepeat = 1;  // frames each STEP advances, comes from RESET
-        static bool lastActionOk;     // did the last action actually go through
-        static bool levelGenerated;   // set by the GenerateLevel hook
-        static bool resetTriggered;   // fade kicked, waiting on generation
-        static bool forcedMenu;
-        static long resetStartedAt;
-        static string resetDifficulty = "Easy";
-        static int resetTimeMode;
-        static int pendingSeed;
-        static bool hasPendingSeed;
-        static long lastScore;
-        static int lastHazardTiles;  // flooded tile count last step, for the spread penalty
-
-        // reward shaping, set per episode from RESET so tuning happens on the
-        // python side. losing the city before the timer costs death_penalty,
-        // running out the clock is the natural end so that costs nothing
-        static float rewardDeathPenalty = 1500f;
-        static float rewardInvalidAction;
-        static float rewardHazard;  // charged per active water/lava front each step
-
-        // the control panel reads these, the game thread writes them as replies
-        // go out so theyre at most one step stale
-        public static long StatScore;
-        public static int StatGold;
-        public static int StatDwarves;
-        public static int StatTimeLeft;
-
-        public static long Frame { get { return frame; } }
-        public static bool EnvConnected { get { return envConnected; } }
-        public static bool RenderingOn { get { return rendering; } }
-        public static bool EpisodeActive { get { return phase != Phase.Free; } }
-
-        public static void SetRendering(bool on, int fps)
-        {
-            rendering = on;
-            maxFps = fps;
-            Log("panel: rendering -> " + on + (fps > 0 ? " at " + fps + " fps" : ""));
-        }
-
-        static bool fastClock;
-        static MethodInfo suppressDraw;
-        static PropertyInfo piFixedStep, piInactiveSleep;
-
-        // optional frame pacing, for watching at human speed. 0 = unlimited.
-        // training wants this off; flip it on (60 = real time) to spectate or
-        // record, then back off to resume full speed.
         static volatile int maxFps;
-        static readonly System.Diagnostics.Stopwatch pacer = System.Diagnostics.Stopwatch.StartNew();
-        static long nextFrameDueMs;
 
-        static WsClient ws;
+        // ---- woven entry points (loader matches these by name + IL) ----
 
         // woven into the start of Dwarves.Program.Main
         public static void Boot()
@@ -124,10 +65,11 @@ namespace DwarfsMod
                     logPath = Path.Combine(Path.GetTempPath(), "dwarfs_mod_" + port + ".log");
 
                 Log("boot: bridge starting, will connect to ws://" + host + ":" + port);
-                var t = new Thread(SocketLoop);
-                t.IsBackground = true;
-                t.Name = "bridge-socket";
-                t.Start();
+                // the host world's Game1 doesnt exist yet (Main hasnt built it), so
+                // attach it on the first Update hook. the socket can start knocking
+                // now though, the env retries until the game is up
+                hostWorld = new World(host, port, logPath);
+                hostWorld.StartSocket();
 
                 // the control panel is for humans, parallel training sets
                 // DWARFS_BRIDGE_GUI=0 so you dont get 8 windows popping up
@@ -143,307 +85,22 @@ namespace DwarfsMod
             catch (Exception e) { Log("boot failed: " + e); }
         }
 
-        // woven into the start of Game1.Update. while an episode is live this is
-        // the lockstep gate, the frame doesnt run until the env says so
+        // woven into the start of Game1.Update. routes to the world wrapping this
+        // Game1 (attaching the host on its first call) and runs its lockstep gate
         public static void BeforeUpdate(object game)
         {
-            frame++;
             // Path C feasibility spike, one shot, only when DWARFS_BRIDGE_C_SPIKE=1
             MultiWorldSpike.MaybeRun(game);
-            if (!rendering)
-                SuppressDraw(game);
-            if (phase != Phase.Free)
-            {
-                KeepFast(game);
-                Pace();
-                if (frame % 1800 == 0) // breadcrumbs in case of a silent death
-                    Log("heartbeat: tick " + frame + ", state " + GameControl.GameStateId(game) +
-                        ", time " + GameState.TimeLeft(game) + ", dwarves " + GameState.DwarfCount(game));
-            }
-
-            // mid reset. let frames run free while we herd the game into a fresh
-            // arcade round then hand the env its first observation. first wait
-            // til we're somewhere the transition actually generates from (menu
-            // or in game, at boot that means riding out the intro screens), then
-            // once the fade is kicked just wait for GenerateLevel to fire
-            if (phase == Phase.Resetting)
-            {
-                if (!resetTriggered)
-                {
-                    if (GameControl.CanStartArcade(game))
-                    {
-                        if (GameControl.StartArcade(game, resetDifficulty, resetTimeMode))
-                        {
-                            resetTriggered = true;
-                            Log("arcade start triggered from state " + GameControl.GameStateId(game));
-                        }
-                        else
-                        {
-                            Log("arcade start failed, replying with current state");
-                            FinishReset(game);
-                        }
-                    }
-                    else if (!forcedMenu && frame - resetStartedAt > ForceMenuAfterFrames)
-                    {
-                        forcedMenu = true;
-                        Log("stuck in state " + GameControl.GameStateId(game) + ", forcing menu");
-                        GameControl.ForceToMenu(game);
-                    }
-                    else if (frame - resetStartedAt > ResetTimeoutFrames)
-                    {
-                        Log("never reached a startable state (state " +
-                            GameControl.GameStateId(game) + "), replying anyway");
-                        FinishReset(game);
-                    }
-                    if (phase == Phase.Resetting) return;
-                }
-                else if (levelGenerated)
-                {
-                    Log("reset complete (state " + GameControl.GameStateId(game) +
-                        ", time " + GameState.TimeLeft(game) + ")");
-                    FinishReset(game);
-                }
-                else if (frame - resetStartedAt > ResetTimeoutFrames)
-                {
-                    Log("fade triggered but level never generated, replying anyway");
-                    FinishReset(game);
-                }
-                else
-                {
-                    return;
-                }
-            }
-
-            // burn through the current STEPs frames and score + report after the
-            // last one (action_repeat > 1 means one decision spans a bunch of frames)
-            if (stepFramesLeft > 0)
-            {
-                stepFramesLeft--;
-                if (stepFramesLeft > 0) return;
-
-                long score = GameState.Score(game);
-                float reward = score - lastScore;
-                lastScore = score;
-
-                // state 1 is the only "still playing" state. 2 is the game over
-                // sequence (city flooded / blown up) and anything else is a menu
-                int state = GameControl.GameStateId(game);
-                int timeLeft = GameState.TimeLeft(game);
-                bool terminated = state != 1
-                    || timeLeft <= 0
-                    || GameState.CityHP(game) <= 0;
-
-                if (!lastActionOk)
-                    reward -= rewardInvalidAction;
-                if (terminated && timeLeft > 0)
-                    reward -= rewardDeathPenalty; // died, didnt make the timer
-                // sting for water/lava actively spreading. count how many new
-                // flooded tiles showed up since last step, so a sealed cave costs
-                // nothing but a flood on the move racks it up til its walled off
-                if (rewardHazard != 0f)
-                {
-                    int hz = GameState.HazardTiles(game);
-                    int spread = hz - lastHazardTiles;
-                    lastHazardTiles = hz;
-                    if (spread > 0)
-                        reward -= rewardHazard * spread;
-                }
-                Send(BuildState(game, reward, terminated, false));
-            }
-
-            while (true)
-            {
-                Dictionary<string, object> cmd = null;
-                lock (gate)
-                {
-                    if (mailbox != null)
-                    {
-                        cmd = mailbox;
-                        mailbox = null;
-                    }
-                    else if (phase == Phase.Running)
-                    {
-                        if (!envConnected || !Monitor.Wait(gate, CommandTimeoutMs))
-                        {
-                            phase = Phase.Free;
-                            Log(envConnected
-                                ? "no command for " + CommandTimeoutMs / 1000 + "s, releasing the game"
-                                : "env disconnected, releasing the game");
-                            SlowClock(game);
-                            return;
-                        }
-                        continue; // woke up, check the mailbox again
-                    }
-                    else
-                    {
-                        return; // free running, nothing waiting
-                    }
-                }
-
-                try
-                {
-                    if (HandleCommand(cmd, game))
-                        return; // a frame needs to run now
-                }
-                catch (Exception e) { Log("command failed: " + e); }
-            }
+            World w = Resolve(game);
+            if (w != null) w.Update();
         }
 
-        // true means "advance the frame now"
-        static bool HandleCommand(Dictionary<string, object> cmd, object game)
-        {
-            string name = MiniJson.GetString(cmd, "command", "");
-            switch (name)
-            {
-                case "RESET":
-                {
-                    string mode = MiniJson.GetString(cmd, "mode", "m5");
-                    resetDifficulty = MiniJson.GetString(cmd, "difficulty", "Easy");
-                    resetTimeMode = GameControl.TimeModeFromString(mode);
-                    int seed = MiniJson.GetInt(cmd, "seed", int.MinValue);
-                    hasPendingSeed = seed != int.MinValue;
-                    pendingSeed = seed;
-
-                    actionRepeat = MiniJson.GetInt(cmd, "action_repeat", 1);
-                    if (actionRepeat < 1) actionRepeat = 1;
-                    if (actionRepeat > 240) actionRepeat = 240;
-                    rewardDeathPenalty = MiniJson.GetFloat(cmd, "death_penalty", 1500f);
-                    rewardInvalidAction = MiniJson.GetFloat(cmd, "invalid_action", 0f);
-                    rewardHazard = MiniJson.GetFloat(cmd, "hazard_penalty", 0f);
-
-                    // episodes run headless unless asked, watching is opt in.
-                    // the panel checkbox can still flip it back on mid run
-                    rendering = MiniJson.GetBool(cmd, "render", false);
-                    maxFps = MiniJson.GetInt(cmd, "render_fps", 0);
-
-                    Log("RESET: " + resetDifficulty + " " + mode +
-                        (hasPendingSeed ? " seed " + seed : " unseeded") +
-                        ", repeat " + actionRepeat +
-                        ", game in state " + GameControl.GameStateId(game));
-                    FastClock(game);
-                    levelGenerated = false;
-                    resetTriggered = false;
-                    forcedMenu = false;
-                    resetStartedAt = frame;
-                    phase = Phase.Resetting;
-                    return true; // run frames so the transition can play out
-                }
-
-                case "STEP":
-                {
-                    int action = MiniJson.GetInt(cmd, "action", 0);
-                    int x = MiniJson.GetInt(cmd, "x", -1);
-                    int y = MiniJson.GetInt(cmd, "y", -1);
-                    lastActionOk = ApplyAction(game, action, x, y);
-                    stepFramesLeft = actionRepeat;
-                    return true;
-                }
-
-                case "RENDER":
-                    rendering = MiniJson.GetBool(cmd, "enabled", true);
-                    maxFps = MiniJson.GetInt(cmd, "max_fps", 0);
-                    Log("rendering -> " + rendering +
-                        (maxFps > 0 ? " at " + maxFps + " fps" : " unthrottled"));
-                    return false;
-
-                case "QUIT":
-                    // go out through the games own fade path so the trainer
-                    // doesnt have to kill the process
-                    Log("QUIT received, shutting the game down");
-                    phase = Phase.Free;
-                    GameControl.QuitGame(game);
-                    return true; // run frames so the exit fade can play out
-
-                default:
-                    Log("unknown command: " + name);
-                    return false;
-            }
-        }
-
-        // coordinates come in relative to the window (thats all the model sees)
-        // so translate to map tiles using where the last observations crop sat
-        static bool ApplyAction(object game, int action, int x, int y)
-        {
-            switch (action)
-            {
-                case 0:
-                    return true; // idle is always fine
-                case 1:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceDynamite(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 2:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceWall(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 3: // green arrows, 3 up 4 right 5 down 6 left
-                case 4:
-                case 5:
-                case 6:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceArrow(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y, action - 3);
-                case 7: // place tower (outpost)
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceOutpost(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 8: // reinforce wall, patch a damaged wall back to full
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.ReinforceWall(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                // outpost actions, the tile picks which tower
-                case 9: // toggle digger spawner
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostToggleDigger(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 10: // spawn warrior
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostSpawnWarrior(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 11: // recall all warriors
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostRecall(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 12: // cannon strike, tile is the target to fire at
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostCannon(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                case 13: // toggle warrior training
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostToggleTrain(game,
-                        GameState.LastCropX + x, GameState.LastCropY + y);
-                default:
-                    return false;
-            }
-        }
-
-        static void FinishReset(object game)
-        {
-            levelGenerated = false;
-            hasPendingSeed = false;
-            phase = Phase.Running;
-            lastActionOk = true; // don't carry a stale flag into the new episode
-            lastScore = GameState.Score(game);
-            lastHazardTiles = rewardHazard != 0f ? GameState.HazardTiles(game) : 0;
-            GameState.LogNextGrid = true; // log mask coverage once per episode
-            Send(BuildState(game, 0f, false, false));
-        }
-
-        // woven into the start of Game1.GenerateLevel, right before the world
-        // gets built. reseeding here means nothing else can pull numbers from
-        // the rng between the seed and the generation. heads up, restarting from
-        // in game runs the generator TWICE in one transition so we keep
-        // reseeding til the reset is done. the last generation is the one that
-        // sticks and this way every pass starts from the same rng
+        // woven into the start of Game1.GenerateLevel, right before the world gets
+        // built, so the bridge can reseed the rng and tell that a reset landed
         public static void BeforeGenerateLevel(object game)
         {
-            if (phase != Phase.Resetting) return; // campaign / manual starts
-            if (hasPendingSeed)
-            {
-                GameControl.Reseed(game, pendingSeed);
-                Log("level rng seeded with " + pendingSeed);
-            }
-            levelGenerated = true;
+            World w = Resolve(game);
+            if (w != null) w.BeforeGenerateLevel(game);
         }
 
         // woven into the start of Game1.Draw, false skips the frame entirely
@@ -455,17 +112,75 @@ namespace DwarfsMod
         // woven into the start of the input readers. while an episode is live the
         // human mouse/keyboard cant be allowed to reach the game. agent actions
         // go in through internal calls anyway, a stray hover or click would mess
-        // up the episode, plus the raw input path is where the games silent
-        // crash and exit handler lives (cursor coords outside the window)
+        // up the episode, plus the raw input path is where the games silent crash
+        // and exit handler lives (cursor coords outside the window). gated on the
+        // host world since thats the one with the real window
         public static bool ShouldReadInput()
         {
-            return phase == Phase.Free;
+            return hostWorld == null || !hostWorld.EpisodeActive;
         }
 
-        // ---- clock control ----
-        // the game never touches these xna knobs itself so theyre all ours
+        // find the world wrapping this Game1, attaching the host on its first
+        // sighting. extra worlds are pre-registered by the multi-world loop
+        static World Resolve(object game)
+        {
+            World w;
+            if (worlds.TryGetValue(game, out w))
+                return w;
+            if (hostWorld != null && hostWorld.Game == null)
+            {
+                hostWorld.Game = game;
+                worlds[game] = hostWorld;
+                return hostWorld;
+            }
+            return null;
+        }
 
-        static void FastClock(object game)
+        // register a world the multi-world loop has built, so the GenerateLevel
+        // hook can route to it (its Update gets driven by the loop, not the hook)
+        internal static void Register(World w)
+        {
+            if (w != null && w.Game != null) worlds[w.Game] = w;
+        }
+
+        // ---- control panel surface (reads the host world) ----
+
+        public static long Frame { get { var w = hostWorld; return w != null ? w.Frame : 0; } }
+        public static bool EnvConnected { get { var w = hostWorld; return w != null && w.EnvConnected; } }
+        public static bool RenderingOn { get { return rendering; } }
+        public static bool EpisodeActive { get { var w = hostWorld; return w != null && w.EpisodeActive; } }
+
+        public static long StatScore { get { var w = hostWorld; return w != null ? w.StatScore : 0; } }
+        public static int StatGold { get { var w = hostWorld; return w != null ? w.StatGold : 0; } }
+        public static int StatDwarves { get { var w = hostWorld; return w != null ? w.StatDwarves : 0; } }
+        public static int StatTimeLeft { get { var w = hostWorld; return w != null ? w.StatTimeLeft : 0; } }
+
+        public static void SetRendering(bool on, int fps)
+        {
+            SetRenderState(on, fps);
+            Log("panel: rendering -> " + on + (fps > 0 ? " at " + fps + " fps" : ""));
+        }
+
+        // set by RESET/RENDER commands and the panel. host-level, one window
+        internal static void SetRenderState(bool on, int fps)
+        {
+            rendering = on;
+            maxFps = fps;
+        }
+
+        internal static int MaxFps { get { return maxFps; } }
+
+        // ---- host-level clock + pacing control ----
+        // the game never touches these xna knobs itself so theyre all ours, and
+        // they act on the single real window/device, so they live here not per world
+
+        static bool fastClock;
+        static MethodInfo suppressDraw;
+        static PropertyInfo piFixedStep, piInactiveSleep;
+        static readonly System.Diagnostics.Stopwatch pacer = System.Diagnostics.Stopwatch.StartNew();
+        static long nextFrameDueMs;
+
+        internal static void FastClock(object game)
         {
             if (fastClock) return;
             try
@@ -490,7 +205,7 @@ namespace DwarfsMod
         // FastClock wasnt always sticking, a backgrounded window would fall back
         // to xnas default InactiveSleepTime and cap around 40fps, so just keep
         // hammering them while an episode runs. cheap, two property sets a frame
-        static void KeepFast(object game)
+        internal static void KeepFast(object game)
         {
             try
             {
@@ -506,7 +221,7 @@ namespace DwarfsMod
             catch { }
         }
 
-        static void SlowClock(object game)
+        internal static void SlowClock(object game)
         {
             if (!fastClock) return;
             try
@@ -530,7 +245,7 @@ namespace DwarfsMod
 
         // hold each frame back til its slot comes up. resyncs after stalls so a
         // slow python step doesnt cause a fast forward burst right after
-        static void Pace()
+        internal static void Pace()
         {
             int fps = maxFps;
             if (fps <= 0)
@@ -548,7 +263,7 @@ namespace DwarfsMod
             nextFrameDueMs += interval;
         }
 
-        static void SuppressDraw(object game)
+        internal static void SuppressDraw(object game)
         {
             try
             {
@@ -560,107 +275,7 @@ namespace DwarfsMod
             catch { } // worst case the ShouldRender weave still skips our Draw body
         }
 
-        // ---- protocol ----
-
-        // the message the env consumes. every field in it every time cause the
-        // env side indexes straight into this dict. besides the grid we also
-        // ship the scalars the model needs to act on, you cant decide to buy
-        // dynamite without knowing your gold
-        static string BuildState(object game, float reward, bool terminated, bool truncated)
-        {
-            // read each scalar once, the control panel reuses them off the statics
-            int gold = GameState.Gold(game);
-            long score = GameState.Score(game);
-            int dwarves = GameState.DwarfCount(game);
-            int timeLeft = GameState.TimeLeft(game);
-            StatGold = gold;
-            StatScore = score;
-            StatDwarves = dwarves;
-            StatTimeLeft = timeLeft;
-
-            var sb = new StringBuilder(ObsW * ObsH * 2 + 256);
-            sb.Append("{\"map_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadGrid(game, ObsW, ObsH));
-            // dwarf and enemy layers read off the crop ReadGrid just set, keep them right after
-            sb.Append(",\"dwarf_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadDwarfGrid(game, ObsW, ObsH));
-            sb.Append(",\"enemy_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadEnemyGrid(game, ObsW, ObsH));
-            sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            sb.Append(",\"terminated\":").Append(terminated ? "true" : "false");
-            sb.Append(",\"truncated\":").Append(truncated ? "true" : "false");
-            sb.Append(",\"gold\":").Append(gold);
-            sb.Append(",\"score\":").Append(score);
-            sb.Append(",\"dwarves\":").Append(dwarves);
-            sb.Append(",\"time_left\":").Append(timeLeft);
-            sb.Append(",\"city_hp\":").Append(GameState.CityHP(game));
-            sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
-            sb.Append(",\"crop_x\":").Append(GameState.LastCropX);
-            sb.Append(",\"crop_y\":").Append(GameState.LastCropY);
-            sb.Append(",\"tick\":").Append(frame);
-            sb.Append('}');
-            return sb.ToString();
-        }
-
-        static void Send(string json)
-        {
-            var sock = ws;
-            if (sock == null || !sock.Connected)
-            {
-                Log("send skipped, not connected");
-                return;
-            }
-            try { sock.SendText(json); }
-            catch (Exception e) { Log("send failed: " + e.Message); }
-        }
-
-        // background thread that keeps a connection up, drops whatever arrives
-        // into the mailbox and wakes the game thread
-        static void SocketLoop()
-        {
-            while (true)
-            {
-                try
-                {
-                    var client = new WsClient();
-                    if (!client.Connect(host, port, "/"))
-                    {
-                        Thread.Sleep(3000); // env not up yet, keep knocking
-                        continue;
-                    }
-                    ws = client;
-                    lock (gate) { envConnected = true; }
-                    Log("connected to env");
-
-                    while (true)
-                    {
-                        string msg = client.ReceiveText();
-                        if (msg == null) break;
-                        var cmd = MiniJson.Parse(msg);
-                        lock (gate)
-                        {
-                            mailbox = cmd;
-                            Monitor.PulseAll(gate);
-                        }
-                    }
-
-                    Log("connection lost, retrying");
-                    ws = null;
-                    lock (gate)
-                    {
-                        envConnected = false;
-                        Monitor.PulseAll(gate); // unblock the game thread
-                    }
-                }
-                catch (Exception e)
-                {
-                    Log("socket loop: " + e.Message);
-                    ws = null;
-                    lock (gate) { envConnected = false; Monitor.PulseAll(gate); }
-                    Thread.Sleep(3000);
-                }
-            }
-        }
+        // ---- logging ----
 
         internal static void LogLine(string msg)
         {

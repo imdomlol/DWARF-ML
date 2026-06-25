@@ -225,3 +225,57 @@ def make_vec_env(n, base_port=8765, stagger=4.0, game_exe=None, **kwargs):
         return _make
 
     return SubprocVecEnv([factory(i) for i in range(n)])
+
+
+def make_world_env(n, base_port=8765, game_exe=None, **kwargs):
+    # multi-world (Path C): ONE patched game process hosting n worlds, with n env
+    # workers connecting to it. unlike make_vec_env (n separate processes, one GPU
+    # device each, capped at the 2-3 the card hands out), this launches a single
+    # game with DWARFS_BRIDGE_WORLDS=n. that process owns one real device and runs
+    # n independent worlds in-process, so the parallel env count scales on CPU/RAM
+    # instead of the graphics card. each worker is a plain DwarfsEnv connecting on
+    # its own port; none of them launches a game. extra kwargs pass through to
+    # every DwarfsEnv just like make_vec_env.
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnvWrapper
+    if game_exe is None:
+        game_exe = default_game_exe()
+
+    def factory(i):
+        def _make():
+            # game_exe stays None: workers only connect, the one process below
+            # hosts every world
+            return DwarfsEnv(port=base_port + i, **kwargs)
+        return _make
+
+    # stand the n websocket servers up first (one per worker), THEN launch the
+    # single game so the mod finds every port on its first connect sweep
+    venv = SubprocVecEnv([factory(i) for i in range(n)])
+
+    childenv = dict(os.environ)
+    childenv["DWARFS_BRIDGE_PORT"] = str(base_port)
+    childenv["DWARFS_BRIDGE_WORLDS"] = str(n)
+    childenv["DWARFS_BRIDGE_GUI"] = "0"
+    game = subprocess.Popen([game_exe], cwd=os.path.dirname(game_exe), env=childenv)
+
+    class _MultiWorldVecEnv(VecEnvWrapper):
+        # owns the single game process so closing the vec env brings it down too
+        def __init__(self, venv, game):
+            super().__init__(venv)
+            self._game = game
+
+        def reset(self):
+            return self.venv.reset()
+
+        def step_wait(self):
+            return self.venv.step_wait()
+
+        def close(self):
+            self.venv.close()
+            if self._game is not None:
+                try:
+                    self._game.wait(timeout=8)
+                except Exception:
+                    self._game.kill()
+                self._game = None
+
+    return _MultiWorldVecEnv(venv, game)

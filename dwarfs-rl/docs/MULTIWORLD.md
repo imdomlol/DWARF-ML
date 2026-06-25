@@ -1,9 +1,13 @@
 # Multi-world (Path C) — many game worlds, one process, one GPU device
 
-Status: **foundation proven, production not yet built.** This doc is the single
-place to understand the multi-world feature: the goal, what we've learned, what
-exists today, and what's left to ship it. The broader headless investigation
-(paths A–F) lives in [HEADLESS.md](HEADLESS.md); this is the deep dive on Path C.
+Status: **production built and working end-to-end (serial scheduler).** N worlds
+run in one process on one device, each deterministic and isolated, reachable from
+Python as a normal vec env. Verified at 10 worlds. What remains is a throughput
+upgrade (thread the worlds across cores) and combat-regime validation — see §5/§6.
+This doc is the single place to understand the multi-world feature: the goal, what
+we've learned, what exists today, and what's left. The broader headless
+investigation (paths A–F) lives in [HEADLESS.md](HEADLESS.md); this is the deep
+dive on Path C.
 
 ---
 
@@ -93,13 +97,36 @@ device per world — only the host pays the device/content cost, once.
 
 ## 4. What's already implemented
 
-**Toward this feature specifically:**
+**The production feature (built, working):**
 
-- **Validation spike** — [mod/MultiWorldSpike.cs](../mod/MultiWorldSpike.cs),
-  gated `DWARFS_BRIDGE_C_SPIKE=1`, run once from the primary's `Update` hook. This
-  is **throwaway proof-of-concept**, not production: it constructs extra worlds,
-  proves the build pattern, isolation, determinism, and economy. It will be
-  *replaced* by the production host, not shipped.
+- **Per-world `Bridge`** — [mod/World.cs](../mod/World.cs) holds all the
+  lockstep/episode/reward/socket state that used to be static on `Bridge`, keyed
+  per `Game1`. [Bridge.cs](../mod/Bridge.cs) is now the coordinator (registry +
+  the five woven hooks + the host-level device/window concerns).
+- **Detached worlds + host loop** — [mod/WorldSim.cs](../mod/WorldSim.cs) promotes
+  the spike's build pattern (`CreateDetached` / `BuildLevel` / `DriveFrame`) into
+  reusable production code. With `DWARFS_BRIDGE_WORLDS=N` the real `Game1` becomes
+  a headless driver that owns the device, builds N detached trainee worlds sharing
+  its infra, and pumps them all in lockstep from its `Update` hook (serial,
+  one core). Each world has its own port/socket/episode lifecycle; a detached
+  `RESET` rebuilds the level directly (no fade) and each `STEP` hand-drives the
+  arcade `Update` sequence.
+- **Python M-ports** — [python/dwarfs_env.py](../python/dwarfs_env.py)
+  `make_world_env(n)` launches **one** game hosting N worlds and N workers
+  connecting to ports `8765..8765+N-1`; [python/train.py](../python/train.py)
+  exposes it as `--multiworld`.
+- **Correctness gate** — [python/multiworld_test.py](../python/multiworld_test.py)
+  proves isolation (two same-seed worlds stay byte-identical for a whole run while
+  siblings run other seeds), divergence, parity with a normal single-instance game
+  (modulo a documented 1-tick start offset), and throughput. **Passes at 10
+  worlds.** Single-instance `fake_env.py` still passes unchanged.
+
+**Validation spike (superseded):**
+
+- [mod/MultiWorldSpike.cs](../mod/MultiWorldSpike.cs), gated
+  `DWARFS_BRIDGE_C_SPIKE=1`, still runs once from the primary's `Update` hook in
+  single-instance mode. It proved the build pattern; the production code above now
+  carries it. Safe to retire in a later cleanup.
 
 **Reusable foundations already in the codebase (the build leans on these):**
 
@@ -121,56 +148,64 @@ the need for it, but it stays as a robust fallback.
 
 ---
 
-## 5. What's left to implement (production build)
+## 5. Build status
 
-No remaining unknowns of the "will it work" kind — this is engineering.
+Items 1–5 are **done** (see §4); 6 is partial. What's left is throughput and
+hardening, not "will it work."
 
-1. **Bring-up host.** Promote the spike's build pattern into the real boot path:
-   the host `Game1` initializes normally and owns the device; M-1 extra worlds are
-   constructed and seeded with the shared infra + fresh per-world state. Decide who
-   the host is (a dedicated world, or world 0 doubling as a trainee).
+1. ✅ **Bring-up host.** The real `Game1` is a dedicated headless driver (owns the
+   device, plays nothing); it builds N detached trainee worlds. (Single-instance
+   keeps the old host-is-trainee path unchanged.)
+2. ✅ **Per-world `Bridge`.** Done — `World` per `Game1`, `Bridge` coordinates.
+3. ✅ **Multi-world host loop.** Serial scheduler: the driver pumps every trainee
+   once per frame; each world advances only on its own STEP and replies with its
+   own obs/reward. Per-world RESET rebuilds the level directly; per-world QUIT
+   parks just that world (the shared process stays up for its siblings).
+4. ✅ **Correctness check.** `multiworld_test.py` — isolation/divergence/parity all
+   pass at 10 worlds; single-instance `fake_env.py` unchanged.
+5. ✅ **Python side.** `make_world_env` + `--multiworld`.
+6. ◐ **Robustness (partial).** Per-world logging (one log per port) and graceful
+   teardown (Python owns the one process; QUIT parks a world) are in. A throwing
+   command is caught in `World.Pump` and the world is parked without taking down
+   siblings. Still to harden: a hard crash inside `DriveFrame`, and rebuild-on-
+   demand for a parked world.
 
-2. **Per-world `Bridge`.** Today [Bridge.cs](../mod/Bridge.cs) keeps `phase`,
-   `frame`, the single-slot mailbox, and reward/episode state in **static** fields
-   (one game assumed). Refactor these into a per-world object keyed by the `Game1`
-   instance, so each world has its own lockstep state, socket/port, and episode
-   lifecycle. This is the load-bearing change; everything else hangs off it.
+### Next: throughput (thread the worlds)
 
-3. **Multi-world host loop.** Drive the M worlds' per-frame sim in lockstep — each
-   world advances only when its env worker sends a STEP, and replies with its own
-   obs/reward. Handle per-world RESET (rebuild that world via
-   `ClearGame`/`GenerateLevel`) and per-world QUIT/shutdown.
-
-4. **Correctness check.** Wire one multi-world `Game1` to the real `Bridge` and run
-   `python/fake_env.py` (the full protocol regression) against it — confirm
-   obs/reward match a normal single-instance game **before** trusting it for
-   training. This is the gate between "the spike says it works" and "we believe
-   the numbers."
-
-5. **Python side.** Expose M ports from one process; point `make_vec_env` at the
-   single process with M workers. The env code barely changes (it already connects
-   per port) — mostly it's launching one game instead of N.
-
-6. **Robustness.** Error isolation (one world crashing must not take down the
-   others or the host), per-world logging, and graceful teardown.
+The scheduler is **serial** — all N worlds' sim runs on one core, so per-world
+throughput falls as N grows (10 worlds ≈ 28 steps/s each, 276/s aggregate at
+`action_repeat=4`). This is correct and matches the proven-safe spike, but it
+doesn't yet use the CPU-scaling headroom that is the whole point. The throughput
+upgrade is to run each world on its own thread (the per-world `Pump`/drive logic is
+already factored for it). That depends on **§6 shared-infra thread-safety** holding
+under concurrency — verify with a threaded re-run of the isolation test before
+trusting it.
 
 ---
 
 ## 6. Open risks / still to verify
 
-- **Obs/reward parity** with a real single-instance game — not yet compared
-  (item 4 above closes this).
-- **Enemy/combat path** under multi-world — deferred by choice; monster caves are
-  rare, so a dwarf reliably digging into one needs a much longer game than a
-  spike. Validate once long runs are cheap.
-- **Throughput / scaling** — how many worlds before CPU-bound? Unmeasured.
-  Per-world cost is sim + reflection overhead; the device cost is paid once.
-- **Isolation completeness** — the solo-vs-paired proof is strong but covers the
-  no-combat regime. Re-verify once combat is active and when many worlds run.
-- **Shared-infra mutation** — the pattern assumes shared fields (device, sound,
-  textures, fonts) are read-only during sim. Confirm nothing shared is *written*
-  per-world (e.g. a sound trigger or texture-handler cache); anything that is must
-  move to per-world.
+- ✅ **Obs/reward parity** with a real single-instance game — verified. A detached
+  seed-42 Easy world matches a normal game's map exactly (same crop, mask, tile
+  values, gold, HP). One documented difference: the detached world's first obs
+  reports the pristine generated `time_left` (18900) while a normal game reports
+  18899 because its menu→game fade burns one frame first. A 1-tick start offset,
+  irrelevant to training.
+- ✅ **Isolation (no-combat regime)** — verified under stepping at 10 worlds: two
+  same-seed worlds stay byte-identical for a full run while eight other seeds run
+  alongside; each distinct seed yields a distinct map.
+- **Throughput / scaling** — measured serial: 10 worlds ≈ 276 steps/s aggregate
+  (~28/s each) at `action_repeat=4`, one core. Threading across cores is the open
+  upgrade (§5).
+- **Enemy/combat path** under multi-world — still deferred; monster caves are rare,
+  so a dwarf reliably digging into one needs a much longer game than the tests run.
+  Validate once long runs are cheap. Re-verify isolation with combat active.
+- **Shared-infra mutation under concurrency** — the serial scheduler is safe (it's
+  what the spike proved). Threading the worlds assumes shared fields (device,
+  sound, textures, fonts) are read-only during sim; `GenerateLevel` does call the
+  shared `xSoundSystem.StartGame()`, which is harmless for headless correctness but
+  is a write to shared state — confirm nothing shared that affects obs/reward is
+  written per-world before trusting the threaded driver.
 
 ---
 

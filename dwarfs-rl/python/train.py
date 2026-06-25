@@ -24,7 +24,8 @@ def resolve_power(level: str):
 
 
 def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
-		instances: int = None, power: str = None, invalid_action: float = 0.1) -> None:
+		instances: int = None, power: str = None, invalid_action: float = 0.1,
+		multiworld: bool = False) -> None:
 	# The mod connects over websocket and provides observations/rewards.
 	# One instance attaches to a manually launched game; more than one spins up
 	# that many game processes and trains across all of them at once.
@@ -34,10 +35,12 @@ def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 		torch.set_num_threads(torch_threads)
 		if instances is None:
 			instances = power_instances
-		if power == "max-safe":
+		if power == "max-safe" and not multiworld:
 			# preflight: bring instances up one at a time and cap to how many the
 			# GPU actually allows, so the run isnt poisoned by ones that fail
-			# device creation. see headless_probe.py / docs/HEADLESS.md
+			# device creation. see headless_probe.py / docs/HEADLESS.md.
+			# multi-world shares one device, so there's no per-instance ceiling to
+			# probe -- it's skipped below
 			from headless_probe import probe_max_instances
 			print(f"Power 'max-safe': probing up to {instances} instance(s) to see "
 				f"how many boot on this GPU (one-time preflight, launches games)...")
@@ -65,7 +68,15 @@ def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 	if invalid_action:
 		print(f"Invalid action penalty: {invalid_action} per refused move.")
 
-	if instances > 1:
+	if instances > 1 and multiworld:
+		# one game process, N worlds in it, sharing one GPU device. scales on
+		# CPU/RAM, not the graphics card (docs/MULTIWORLD.md)
+		from dwarfs_env import make_world_env
+		print(f"Multi-world: one process hosting {instances} worlds on ports "
+			f"8765..{8765 + instances - 1} (one shared GPU device).")
+		env = make_world_env(instances, render=render, render_fps=pace_fps,
+			invalid_action=invalid_action)
+	elif instances > 1:
 		from dwarfs_env import make_vec_env
 		env = make_vec_env(instances, render=render, render_fps=pace_fps,
 			invalid_action=invalid_action)
@@ -122,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--invalid-action", type=float, default=0.1,
 		help="Reward penalty per refused action (illegal placement, not enough gold, etc). "
 			"On by default to discourage spamming impossible moves; pass 0 to turn it off.")
+	parser.add_argument("--multiworld", action="store_true",
+		help="Run all instances as worlds inside ONE game process sharing one GPU "
+			"device (Path C), instead of one process per instance. Lets the instance "
+			"count scale past the GPU's 2-3 device ceiling onto CPU/RAM. Skips the "
+			"max-safe device probe (there's no per-instance device to cap).")
 	return parser
 
 
@@ -131,7 +147,8 @@ def main() -> None:
 		demo_run(args.steps, render=args.render, render_fps=args.render_fps)
 	else:
 		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps,
-			instances=args.instances, power=args.power, invalid_action=args.invalid_action)
+			instances=args.instances, power=args.power, invalid_action=args.invalid_action,
+			multiworld=args.multiworld)
 
 
 if __name__ == "__main__":

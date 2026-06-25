@@ -20,6 +20,13 @@ namespace DwarfsMod
     {
         internal enum Phase { Free, Resetting, Running }
 
+        // Hosted = the one Game1 XNA drives through Game.Run; its frames advance by
+        // returning from the woven Update hook and it resets through the game's own
+        // fade transition. Detached = an extra world the multi-world host loop ticks
+        // by hand (WorldSim.DriveFrame) and resets by rebuilding the level directly,
+        // no window/fade involved.
+        internal enum Mode { Hosted, Detached }
+
         // observation crop around the city. doms env expects 40 rows x 60 cols
         const int ObsW = 60;
         const int ObsH = 40;
@@ -34,8 +41,10 @@ namespace DwarfsMod
         const int ForceMenuAfterFrames = 600;
 
         // the Game1 this world wraps. attached once known (first Update hook for
-        // the host; at construction for extra worlds)
+        // the host; right after CreateDetached for extra worlds)
         internal object Game;
+
+        readonly Mode mode;
 
         // networking, one socket per world so each talks to its own env worker.
         // set DWARFS_BRIDGE_PORT before launch to move the host off 8765
@@ -86,11 +95,12 @@ namespace DwarfsMod
         internal int StatDwarves;
         internal int StatTimeLeft;
 
-        internal World(string host, int port, string logPath)
+        internal World(string host, int port, string logPath, Mode mode = Mode.Hosted)
         {
             this.host = host;
             this.port = port;
             this.logPath = logPath;
+            this.mode = mode;
         }
 
         internal long Frame { get { return frame; } }
@@ -183,33 +193,8 @@ namespace DwarfsMod
                 stepFramesLeft--;
                 if (stepFramesLeft > 0) return;
 
-                long score = GameState.Score(game);
-                float reward = score - lastScore;
-                lastScore = score;
-
-                // state 1 is the only "still playing" state. 2 is the game over
-                // sequence (city flooded / blown up) and anything else is a menu
-                int state = GameControl.GameStateId(game);
-                int timeLeft = GameState.TimeLeft(game);
-                bool terminated = state != 1
-                    || timeLeft <= 0
-                    || GameState.CityHP(game) <= 0;
-
-                if (!lastActionOk)
-                    reward -= rewardInvalidAction;
-                if (terminated && timeLeft > 0)
-                    reward -= rewardDeathPenalty; // died, didnt make the timer
-                // sting for water/lava actively spreading. count how many new
-                // flooded tiles showed up since last step, so a sealed cave costs
-                // nothing but a flood on the move racks it up til its walled off
-                if (rewardHazard != 0f)
-                {
-                    int hz = GameState.HazardTiles(game);
-                    int spread = hz - lastHazardTiles;
-                    lastHazardTiles = hz;
-                    if (spread > 0)
-                        reward -= rewardHazard * spread;
-                }
+                bool terminated;
+                float reward = StepReward(game, out terminated);
                 Send(BuildState(game, reward, terminated, false));
             }
 
@@ -258,8 +243,10 @@ namespace DwarfsMod
             lock (gate)
             {
                 mailbox = cmd;
-                Monitor.PulseAll(gate);
+                Monitor.PulseAll(gate); // wakes a hosted world blocked in Update
             }
+            if (mode == Mode.Detached)
+                Bridge.NotifyWork(); // wakes the multi-world scheduler if it's idling
         }
 
         // true means "advance the frame now"
@@ -270,27 +257,15 @@ namespace DwarfsMod
             {
                 case "RESET":
                 {
-                    string mode = MiniJson.GetString(cmd, "mode", "m5");
-                    resetDifficulty = MiniJson.GetString(cmd, "difficulty", "Easy");
-                    resetTimeMode = GameControl.TimeModeFromString(mode);
-                    int seed = MiniJson.GetInt(cmd, "seed", int.MinValue);
-                    hasPendingSeed = seed != int.MinValue;
-                    pendingSeed = seed;
-
-                    actionRepeat = MiniJson.GetInt(cmd, "action_repeat", 1);
-                    if (actionRepeat < 1) actionRepeat = 1;
-                    if (actionRepeat > 240) actionRepeat = 240;
-                    rewardDeathPenalty = MiniJson.GetFloat(cmd, "death_penalty", 1500f);
-                    rewardInvalidAction = MiniJson.GetFloat(cmd, "invalid_action", 0f);
-                    rewardHazard = MiniJson.GetFloat(cmd, "hazard_penalty", 0f);
+                    string modeStr = ApplyResetParams(cmd);
 
                     // episodes run headless unless asked, watching is opt in.
                     // the panel checkbox can still flip it back on mid run
                     Bridge.SetRenderState(MiniJson.GetBool(cmd, "render", false),
                         MiniJson.GetInt(cmd, "render_fps", 0));
 
-                    Log("RESET: " + resetDifficulty + " " + mode +
-                        (hasPendingSeed ? " seed " + seed : " unseeded") +
+                    Log("RESET: " + resetDifficulty + " " + modeStr +
+                        (hasPendingSeed ? " seed " + pendingSeed : " unseeded") +
                         ", repeat " + actionRepeat +
                         ", game in state " + GameControl.GameStateId(game));
                     Bridge.FastClock(game);
@@ -331,6 +306,131 @@ namespace DwarfsMod
                     Log("unknown command: " + name);
                     return false;
             }
+        }
+
+        // ---- detached worlds (multi-world host loop ticks these by hand) ----
+
+        // called once per scheduler pass. non-blocking: process at most one queued
+        // command and return whether there was one (the scheduler uses that to
+        // decide whether to idle-wait). a detached world never blocks the loop --
+        // that would starve its siblings sharing the game thread.
+        internal bool Pump()
+        {
+            if (Game == null) return false;
+            Dictionary<string, object> cmd;
+            lock (gate)
+            {
+                cmd = mailbox;
+                mailbox = null;
+            }
+            if (cmd == null) return false;
+            try { HandleDetached(cmd, Game); }
+            catch (Exception e) { Log("detached command failed: " + e); }
+            return true;
+        }
+
+        void HandleDetached(Dictionary<string, object> cmd, object game)
+        {
+            string name = MiniJson.GetString(cmd, "command", "");
+            switch (name)
+            {
+                case "RESET":
+                {
+                    string modeStr = ApplyResetParams(cmd);
+                    Log("RESET (detached): " + resetDifficulty + " " + modeStr +
+                        (hasPendingSeed ? " seed " + pendingSeed : " unseeded") +
+                        ", repeat " + actionRepeat);
+                    // no fade, no intro screens: rebuild the level in place and
+                    // reply with the first observation immediately
+                    WorldSim.BuildLevel(game, resetDifficulty, resetTimeMode, pendingSeed, hasPendingSeed);
+                    FinishReset(game);
+                    return;
+                }
+
+                case "STEP":
+                {
+                    int action = MiniJson.GetInt(cmd, "action", 0);
+                    int x = MiniJson.GetInt(cmd, "x", -1);
+                    int y = MiniJson.GetInt(cmd, "y", -1);
+                    lastActionOk = ApplyAction(game, action, x, y);
+                    // drive the burst of sim frames by hand, then score + report
+                    for (int i = 0; i < actionRepeat; i++)
+                    {
+                        frame++;
+                        WorldSim.DriveFrame(game);
+                    }
+                    bool terminated;
+                    float reward = StepReward(game, out terminated);
+                    Send(BuildState(game, reward, terminated, false));
+                    return;
+                }
+
+                case "RENDER":
+                    // detached worlds have no window of their own, nothing to toggle
+                    return;
+
+                case "QUIT":
+                    // one env worker leaving doesnt tear down the shared process or
+                    // its siblings; just park this world until its next RESET
+                    Log("QUIT received (detached), parking world");
+                    phase = Phase.Free;
+                    return;
+
+                default:
+                    Log("unknown command (detached): " + name);
+                    return;
+            }
+        }
+
+        // parse the RESET fields shared by both drive modes (difficulty, time mode,
+        // seed, action_repeat, reward weights). returns the raw mode string for
+        // logging. render/clock are host-level and handled by the hosted caller only
+        string ApplyResetParams(Dictionary<string, object> cmd)
+        {
+            string modeStr = MiniJson.GetString(cmd, "mode", "m5");
+            resetDifficulty = MiniJson.GetString(cmd, "difficulty", "Easy");
+            resetTimeMode = GameControl.TimeModeFromString(modeStr);
+            int seed = MiniJson.GetInt(cmd, "seed", int.MinValue);
+            hasPendingSeed = seed != int.MinValue;
+            pendingSeed = seed;
+            actionRepeat = MiniJson.GetInt(cmd, "action_repeat", 1);
+            if (actionRepeat < 1) actionRepeat = 1;
+            if (actionRepeat > 240) actionRepeat = 240;
+            rewardDeathPenalty = MiniJson.GetFloat(cmd, "death_penalty", 1500f);
+            rewardInvalidAction = MiniJson.GetFloat(cmd, "invalid_action", 0f);
+            rewardHazard = MiniJson.GetFloat(cmd, "hazard_penalty", 0f);
+            return modeStr;
+        }
+
+        // score delta this step, plus the penalties. shared by hosted + detached.
+        // sets terminated: state 1 is the only "still playing" state, 2 is the game
+        // over sequence (city flooded / blown up) and anything else is a menu
+        float StepReward(object game, out bool terminated)
+        {
+            long score = GameState.Score(game);
+            float reward = score - lastScore;
+            lastScore = score;
+
+            int state = GameControl.GameStateId(game);
+            int timeLeft = GameState.TimeLeft(game);
+            terminated = state != 1 || timeLeft <= 0 || GameState.CityHP(game) <= 0;
+
+            if (!lastActionOk)
+                reward -= rewardInvalidAction;
+            if (terminated && timeLeft > 0)
+                reward -= rewardDeathPenalty; // died, didnt make the timer
+            // sting for water/lava actively spreading. count how many new flooded
+            // tiles showed up since last step, so a sealed cave costs nothing but a
+            // flood on the move racks it up til its walled off
+            if (rewardHazard != 0f)
+            {
+                int hz = GameState.HazardTiles(game);
+                int spread = hz - lastHazardTiles;
+                lastHazardTiles = hz;
+                if (spread > 0)
+                    reward -= rewardHazard * spread;
+            }
+            return reward;
         }
 
         // coordinates come in relative to the window (thats all the model sees)

@@ -29,12 +29,14 @@ The loader prints a `verify:` line; every hook should say True. Requires .NET SD
 
 Python setup and run (also from `dwarfs-rl/`):
 ```
-pip install -r requirements.txt        # torch, gymnasium, stable_baselines3, websockets, numpy
+pip install -r requirements.txt        # torch, gymnasium, stable_baselines3, websockets, numpy, tensorboard
 python python/train.py                       # PPO training (MultiInputPolicy)
 python python/train.py --instances 4         # train across 4 game instances at once
+python python/train.py --instances 10 --multiworld   # 10 worlds in ONE process, one GPU device (Path C)
+python python/train.py --instances 4 --multiworld --tensorboard   # + log curves to ./runs
 python python/train.py --mode demo --render  # random-action demo with rendering
 ```
-`train.py` flags: `--mode train|demo`, `--timesteps N`, `--steps N`, `--render`, `--render-fps N`, `--instances N` (spin up N games and train across them via SubprocVecEnv), `--power max|moderate|min` (one dial for how much of the machine to use — sets the instance count unless `--instances` is given, a per-game frame cap, and PyTorch's thread count; `max` ≈ cores−1 at full speed, `min` = one throttled instance). It imports the env as `from dwarfs_env import DwarfsEnv` (same `python/` dir), so run it from `dwarfs-rl/` as shown. Note: the frame cap (`render_fps`) paces the game even headless, so it doubles as a CPU governor — `train.py` only applies it to headless runs when `--power` asks, otherwise headless runs full speed.
+`train.py` flags: `--mode train|demo`, `--timesteps N`, `--steps N`, `--render`, `--render-fps N`, `--instances N` (spin up N games and train across them via SubprocVecEnv), `--multiworld` (run all instances as worlds inside ONE game process sharing one GPU device — Path C, see docs/MULTIWORLD.md — so the instance count scales on CPU/RAM past the GPU's ~2–3 device ceiling), `--tensorboard` / `--logdir DIR` (write TensorBoard logs of episode reward/length, losses, fps and game score to `./runs`; view with `tensorboard --logdir ./runs`), `--power max|moderate|min` (one dial for how much of the machine to use — sets the instance count unless `--instances` is given, a per-game frame cap, and PyTorch's thread count; `max` ≈ cores−1 at full speed, `min` = one throttled instance). Episodes are always wrapped in a Monitor so reward/length show up in the logs; a `GameMetricsCallback` adds the game score. It imports the env as `from dwarfs_env import DwarfsEnv` (same `python/` dir), so run it from `dwarfs-rl/` as shown. Note: the frame cap (`render_fps`) paces the game even headless, so it doubles as a CPU governor — `train.py` only applies it to headless runs when `--power` asks, otherwise headless runs full speed.
 
 **Run order matters: start the Python side first** (it owns the WebSocket *server*; the mod is the *client* and connects to it, retrying every few seconds). Then launch `game-patched\Dwarfs.exe`.
 

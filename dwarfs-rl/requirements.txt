@@ -3,3 +3,4 @@ numpy==2.4.6
 gymnasium==1.2.3
 stable_baselines3==2.8.0
 websockets
+tensorboard

@@ -3,8 +3,38 @@ import os
 
 import torch
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecMonitor
 
 from dwarfs_env import DwarfsEnv
+
+
+class GameMetricsCallback(BaseCallback):
+    """logs Dwarfs-specific end-of-episode numbers (final score) on top of the
+    reward/length curves VecMonitor already records. score is the actual game
+    objective, so it's the most interpretable 'is it learning' signal -- shaped
+    reward can drift while score is what you care about."""
+
+    def __init__(self):
+        super().__init__()
+        self._scores = []
+
+    def _on_step(self) -> bool:
+        # Monitor stamps info["episode"] on the step an episode ends; the env also
+        # carries the live "score" each step, so at that step it's the final score
+        for info in self.locals.get("infos", []):
+            if "episode" in info and "score" in info:
+                self._scores.append(float(info["score"]))
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self._scores:
+            n = len(self._scores)
+            self.logger.record("game/final_score_mean", sum(self._scores) / n)
+            self.logger.record("game/final_score_max", max(self._scores))
+            self.logger.record("game/episodes_in_rollout", n)
+            self._scores.clear()
 
 
 def resolve_power(level: str):
@@ -25,7 +55,7 @@ def resolve_power(level: str):
 
 def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 		instances: int = None, power: str = None, invalid_action: float = 0.1,
-		multiworld: bool = False) -> None:
+		multiworld: bool = False, tensorboard: bool = False, logdir: str = "./runs") -> None:
 	# The mod connects over websocket and provides observations/rewards.
 	# One instance attaches to a manually launched game; more than one spins up
 	# that many game processes and trains across all of them at once.
@@ -76,17 +106,29 @@ def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 			f"8765..{8765 + instances - 1} (one shared GPU device).")
 		env = make_world_env(instances, render=render, render_fps=pace_fps,
 			invalid_action=invalid_action)
+		env = VecMonitor(env)
 	elif instances > 1:
 		from dwarfs_env import make_vec_env
 		env = make_vec_env(instances, render=render, render_fps=pace_fps,
 			invalid_action=invalid_action)
+		env = VecMonitor(env)
 	else:
-		env = DwarfsEnv(render=render, render_fps=pace_fps,
-			invalid_action=invalid_action)
-	model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003)
+		# Monitor records episode reward/length so they show up in the logs;
+		# without it SB3 only prints fps/loss and you can't see learning at all
+		env = Monitor(DwarfsEnv(render=render, render_fps=pace_fps,
+			invalid_action=invalid_action))
+
+	# tensorboard_log makes SB3 write event files; view with
+	# `tensorboard --logdir <logdir>` then open http://localhost:6006
+	tb_log = logdir if tensorboard else None
+	if tensorboard:
+		print(f"TensorBoard logging to {logdir} -- run: tensorboard --logdir {logdir}")
+	model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003,
+		tensorboard_log=tb_log)
 
 	print("Training the AI...")
-	model.learn(total_timesteps=total_timesteps)
+	model.learn(total_timesteps=total_timesteps, callback=GameMetricsCallback(),
+		tb_log_name="ppo")
 	print("Training complete.")
 
 	print("Saving the AI...")
@@ -138,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
 			"device (Path C), instead of one process per instance. Lets the instance "
 			"count scale past the GPU's 2-3 device ceiling onto CPU/RAM. Skips the "
 			"max-safe device probe (there's no per-instance device to cap).")
+	parser.add_argument("--tensorboard", action="store_true",
+		help="Write TensorBoard logs (episode reward/length, losses, fps, and game "
+			"score) to --logdir. View with: tensorboard --logdir ./runs")
+	parser.add_argument("--logdir", default="./runs",
+		help="Directory for TensorBoard logs (default ./runs).")
 	return parser
 
 
@@ -148,7 +195,7 @@ def main() -> None:
 	else:
 		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps,
 			instances=args.instances, power=args.power, invalid_action=args.invalid_action,
-			multiworld=args.multiworld)
+			multiworld=args.multiworld, tensorboard=args.tensorboard, logdir=args.logdir)
 
 
 if __name__ == "__main__":

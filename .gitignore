@@ -20,5 +20,8 @@ game-patched/
 dwarfs_agent.zip
 *.zip
 
+# TensorBoard logs
+runs/
+
 # AI
 .claude

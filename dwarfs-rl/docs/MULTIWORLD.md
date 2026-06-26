@@ -186,14 +186,27 @@ hardening, not "will it work."
 ### Throughput (threaded) — done
 
 Each world runs on its own thread (`World.RunLoop`); the host stays at fixed-step so
-it yields cores. `DWARFS_BRIDGE_SERIAL=1` forces the old serial scheduler. Measured
-at 10 worlds with the concurrent driver: ~1.7× serial under heavy sim
-(`action_repeat=32`: ~21k vs ~12.5k sim-frames/s aggregate), roughly even at light
-load where socket round-trips dominate. The gap widens with heavier per-frame sim
-(bigger maps, more entities) and with real `SubprocVecEnv` training, where each
-worker has its own Python process for I/O + inference instead of sharing one asyncio
-loop. Determinism is preserved: same-seed worlds die at the identical step whether
-serial or threaded.
+it yields cores. `DWARFS_BRIDGE_SERIAL=1` forces the old serial scheduler. Level
+generation is serialized behind a lock (`WorldSim.genLock`) because `GenerateLevel`
+touches shared infra — without it, worlds resetting concurrently (exactly what a vec
+env does at startup) corrupt each other; per-frame stepping stays fully parallel.
+
+Measured with `python/bench_throughput.py` at the training default
+`action_repeat=8` (env-collection throughput, no PPO):
+
+| worlds | aggregate env-steps/s | per-world | vs 1 |
+|---|---|---|---|
+| 1 (single-instance) | ~150–185 | ~150–185 | 1× |
+| 4 (multi-world)     | ~815 | ~204 | ~5× |
+| 10 (multi-world)    | ~970 | ~97 | ~6× |
+
+So ~5–6× more experience per wall-second at 4–10 worlds in one process on one GPU
+device. The per-world rate falls with count (CPU contention + the bench's single
+asyncio driver, which real `SubprocVecEnv` avoids by giving each worker its own
+process) — so real training should scale at least this well, often better. Under
+heavier per-frame sim the threaded driver beats serial ~1.7× (`action_repeat=32`:
+~21k vs ~12.5k sim-frames/s). Determinism holds: same-seed worlds die at the
+identical step whether serial or threaded.
 
 ---
 

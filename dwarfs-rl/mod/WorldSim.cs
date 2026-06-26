@@ -33,6 +33,12 @@ namespace DwarfsMod
             "lParticles", "lParticlesGround", "lOutposts", "lDynamicMaps",
         };
 
+        // building a level (ClearGame + GenerateLevel) reaches into shared infra
+        // -- the sound system, texture handler -- in ways per-frame stepping does
+        // not, so two worlds generating at once can corrupt each other. resets are
+        // rare, so serialize generation behind this lock; STEP stays fully parallel.
+        static readonly object genLock = new object();
+
         static bool bound, bindFailed;
         static Type tGame;
         static ConstructorInfo ctor;
@@ -140,23 +146,29 @@ namespace DwarfsMod
                                         int seed, bool hasSeed)
         {
             if (!Bind(game)) return;
-            mSetDifficulty.Invoke(game, new object[] { difficulty });
-
-            object diff = fDifficulty.GetValue(game);
-            if (diff != null)
+            // serialize the whole level build: SetDifficulty/ClearGame/GenerateLevel
+            // all touch shared infra, and worlds resetting concurrently (which is
+            // exactly what a vec env does at startup) would otherwise race
+            lock (genLock)
             {
-                if (fEnTime != null) fEnTime.SetValue(diff, Enum.ToObject(fEnTime.FieldType, timeMode));
-                if (fRush != null) fRush.SetValue(diff, false);
-                if (fDark != null) fDark.SetValue(diff, false);
+                mSetDifficulty.Invoke(game, new object[] { difficulty });
+
+                object diff = fDifficulty.GetValue(game);
+                if (diff != null)
+                {
+                    if (fEnTime != null) fEnTime.SetValue(diff, Enum.ToObject(fEnTime.FieldType, timeMode));
+                    if (fRush != null) fRush.SetValue(diff, false);
+                    if (fDark != null) fDark.SetValue(diff, false);
+                }
+
+                if (hasSeed) fRandomizer.SetValue(game, new Random(seed));
+                mClearGame.Invoke(game, null);
+                if (hasSeed) fRandomizer.SetValue(game, new Random(seed));
+                mGenerateLevel.Invoke(game, null);
+
+                if (fGameState != null) fGameState.SetValue(game, 1);
+                if (fMainMenu != null) fMainMenu.SetValue(game, 0);
             }
-
-            if (hasSeed) fRandomizer.SetValue(game, new Random(seed));
-            mClearGame.Invoke(game, null);
-            if (hasSeed) fRandomizer.SetValue(game, new Random(seed));
-            mGenerateLevel.Invoke(game, null);
-
-            if (fGameState != null) fGameState.SetValue(game, 1);
-            if (fMainMenu != null) fMainMenu.SetValue(game, 0);
         }
 
         // advance one detached world by a single frame: the real arcade Update

@@ -25,6 +25,15 @@ namespace DwarfsMod
         static MethodInfo mGetGold, mAddBonanis;
         static FieldInfo fResources, fCostWall, fCostDynamite, fCostArrow, fCostArrowStart;
 
+        // force both reflection binds up front, on one thread, before the
+        // multi-world driver starts ticking worlds in parallel -- so the worker
+        // threads only ever read these caches, never race to populate them
+        public static void Warmup(object game)
+        {
+            Bind(game);
+            BindEx(game);
+        }
+
         static bool Bind(object game)
         {
             if (bound) return true;

@@ -104,6 +104,7 @@ namespace DwarfsMod
         }
 
         internal long Frame { get { return frame; } }
+        internal int Port { get { return port; } }
         internal bool EnvConnected { get { return envConnected; } }
         internal bool EpisodeActive { get { return phase != Phase.Free; } }
 
@@ -310,10 +311,45 @@ namespace DwarfsMod
 
         // ---- detached worlds (multi-world host loop ticks these by hand) ----
 
-        // called once per scheduler pass. non-blocking: process at most one queued
-        // command and return whether there was one (the scheduler uses that to
-        // decide whether to idle-wait). a detached world never blocks the loop --
-        // that would starve its siblings sharing the game thread.
+        // the threaded driver: each detached world runs this on its own thread, so
+        // worlds tick in parallel across cores instead of one-at-a-time on the game
+        // thread. blocks until its env sends a command, processes it (which
+        // hand-drives the sim), replies, repeats. one sender per socket, isolation
+        // proven by multiworld_test.py (same-seed worlds stay byte-identical).
+        internal void RunLoop()
+        {
+            while (true)
+            {
+                Dictionary<string, object> cmd;
+                lock (gate)
+                {
+                    while (mailbox == null) Monitor.Wait(gate);
+                    cmd = mailbox;
+                    mailbox = null;
+                }
+                HandleDetachedSafely(cmd);
+            }
+        }
+
+        // run a detached command, but guarantee SOME reply gets back to the env so
+        // a throw (RESET build failure, etc.) can't hang it waiting on request().
+        // the STEP path catches its own sim throws to send a real terminated state;
+        // this is the backstop for everything else.
+        void HandleDetachedSafely(Dictionary<string, object> cmd)
+        {
+            try { HandleDetached(cmd, Game); }
+            catch (Exception e)
+            {
+                Log("detached command failed, replying terminated: " + e);
+                phase = Phase.Free;
+                try { Send(MinimalTerminatedState(0f)); } catch { }
+            }
+        }
+
+        // the serial driver alternative: called once per scheduler pass. non-
+        // blocking: process at most one queued command and return whether there was
+        // one (the scheduler uses that to decide whether to idle-wait). used when
+        // DWARFS_BRIDGE_SERIAL=1 forces every world onto the one game thread.
         internal bool Pump()
         {
             if (Game == null) return false;
@@ -324,8 +360,7 @@ namespace DwarfsMod
                 mailbox = null;
             }
             if (cmd == null) return false;
-            try { HandleDetached(cmd, Game); }
-            catch (Exception e) { Log("detached command failed: " + e); }
+            HandleDetachedSafely(cmd);
             return true;
         }
 
@@ -352,16 +387,30 @@ namespace DwarfsMod
                     int action = MiniJson.GetInt(cmd, "action", 0);
                     int x = MiniJson.GetInt(cmd, "x", -1);
                     int y = MiniJson.GetInt(cmd, "y", -1);
-                    lastActionOk = ApplyAction(game, action, x, y);
-                    // drive the burst of sim frames by hand, then score + report
-                    for (int i = 0; i < actionRepeat; i++)
-                    {
-                        frame++;
-                        WorldSim.DriveFrame(game);
-                    }
                     bool terminated;
-                    float reward = StepReward(game, out terminated);
-                    Send(BuildState(game, reward, terminated, false));
+                    float reward;
+                    try
+                    {
+                        lastActionOk = ApplyAction(game, action, x, y);
+                        // drive the burst of sim frames by hand, then score + report
+                        for (int i = 0; i < actionRepeat; i++)
+                        {
+                            frame++;
+                            WorldSim.DriveFrame(game);
+                        }
+                        reward = StepReward(game, out terminated);
+                    }
+                    catch (Exception e)
+                    {
+                        // a sim-internal throw (e.g. a game-over path the headless
+                        // build doesnt fully set up) must not leave the env hanging
+                        // on a reply. end the episode and let the trainer reset.
+                        Log("STEP sim threw, ending episode: " + e);
+                        reward = 0f;
+                        terminated = true;
+                        phase = Phase.Free;
+                    }
+                    SendStateSafe(game, reward, terminated);
                     return;
                 }
 
@@ -530,16 +579,17 @@ namespace DwarfsMod
 
             var sb = new StringBuilder(ObsW * ObsH * 2 + 256);
             sb.Append("{\"map_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadGrid(game, ObsW, ObsH));
-            // dwarf and enemy layers read off the crop ReadGrid just set, keep them right after
+            // crop comes back by value so concurrent worlds on their own threads
+            // never share it; the dwarf/enemy layers read against the same window
+            int cx, cy;
+            MiniJson.AppendIntArray(sb, GameState.ReadGrid(game, ObsW, ObsH, out cx, out cy));
             sb.Append(",\"dwarf_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadDwarfGrid(game, ObsW, ObsH));
+            MiniJson.AppendIntArray(sb, GameState.ReadDwarfGrid(game, ObsW, ObsH, cx, cy));
             sb.Append(",\"enemy_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadEnemyGrid(game, ObsW, ObsH));
-            // snapshot the crop now, before another world's BuildState moves the
-            // shared GameState statics, so this world's next action maps correctly
-            cropX = GameState.LastCropX;
-            cropY = GameState.LastCropY;
+            MiniJson.AppendIntArray(sb, GameState.ReadEnemyGrid(game, ObsW, ObsH, cx, cy));
+            // keep this world's crop so its next action maps window->map correctly
+            cropX = cx;
+            cropY = cy;
             sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append(",\"terminated\":").Append(terminated ? "true" : "false");
             sb.Append(",\"truncated\":").Append(truncated ? "true" : "false");
@@ -551,6 +601,40 @@ namespace DwarfsMod
             sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
             sb.Append(",\"crop_x\":").Append(cropX);
             sb.Append(",\"crop_y\":").Append(cropY);
+            sb.Append(",\"tick\":").Append(frame);
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        // send the normal observation, but if BuildState itself throws on a
+        // half-wrecked world fall back to a minimal terminated reply so the env
+        // still gets a response and can reset instead of blocking
+        void SendStateSafe(object game, float reward, bool terminated)
+        {
+            try { Send(BuildState(game, reward, terminated, false)); }
+            catch (Exception e)
+            {
+                Log("BuildState threw, sending minimal terminated reply: " + e);
+                Send(MinimalTerminatedState(reward));
+            }
+        }
+
+        // zero grids + scalars, terminated. just enough for the env to unpack a
+        // reply and end the episode when the real state can't be read
+        string MinimalTerminatedState(float reward)
+        {
+            var sb = new StringBuilder(ObsW * ObsH * 2 + 128);
+            sb.Append("{\"map_grid\":");
+            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
+            sb.Append(",\"dwarf_grid\":");
+            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
+            sb.Append(",\"enemy_grid\":");
+            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
+            sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            sb.Append(",\"terminated\":true,\"truncated\":false");
+            sb.Append(",\"gold\":0,\"score\":0,\"dwarves\":0,\"time_left\":0,\"city_hp\":0");
+            sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
+            sb.Append(",\"crop_x\":").Append(cropX).Append(",\"crop_y\":").Append(cropY);
             sb.Append(",\"tick\":").Append(frame);
             sb.Append('}');
             return sb.ToString();

@@ -1,13 +1,13 @@
 # Multi-world (Path C) — many game worlds, one process, one GPU device
 
-Status: **production built and working end-to-end (serial scheduler).** N worlds
-run in one process on one device, each deterministic and isolated, reachable from
-Python as a normal vec env. Verified at 10 worlds. What remains is a throughput
-upgrade (thread the worlds across cores) and combat-regime validation — see §5/§6.
-This doc is the single place to understand the multi-world feature: the goal, what
-we've learned, what exists today, and what's left. The broader headless
-investigation (paths A–F) lives in [HEADLESS.md](HEADLESS.md); this is the deep
-dive on Path C.
+Status: **production built and working end-to-end, threaded.** N worlds run in one
+process on one device, each deterministic and isolated, ticking in parallel across
+cores, reachable from Python as a normal vec env. Verified at 10 worlds, including
+worlds dying mid-episode. What remains is combat-regime validation and longer-run
+scaling — see §6. This doc is the single place to understand the multi-world
+feature: the goal, what we've learned, what exists today, and what's left. The
+broader headless investigation (paths A–F) lives in [HEADLESS.md](HEADLESS.md);
+this is the deep dive on Path C.
 
 ---
 
@@ -106,11 +106,25 @@ device per world — only the host pays the device/content cost, once.
 - **Detached worlds + host loop** — [mod/WorldSim.cs](../mod/WorldSim.cs) promotes
   the spike's build pattern (`CreateDetached` / `BuildLevel` / `DriveFrame`) into
   reusable production code. With `DWARFS_BRIDGE_WORLDS=N` the real `Game1` becomes
-  a headless driver that owns the device, builds N detached trainee worlds sharing
-  its infra, and pumps them all in lockstep from its `Update` hook (serial,
-  one core). Each world has its own port/socket/episode lifecycle; a detached
-  `RESET` rebuilds the level directly (no fade) and each `STEP` hand-drives the
-  arcade `Update` sequence.
+  a headless driver that owns the device and builds N detached trainee worlds
+  sharing its infra. Each world has its own port/socket/episode lifecycle; a
+  detached `RESET` rebuilds the level directly (no fade) and each `STEP` hand-drives
+  the arcade `Update` sequence. `CreateDetached` reallocates **only** the per-world
+  entity lists (the ones `ClearGame` clears); other `List<>` fields are shared
+  read-only content (death-tip textures etc.) — blanket-reallocating those to empty
+  was what crashed the game-over path.
+- **Threaded driver (default)** — each world runs `World.RunLoop` on its own
+  thread, so the worlds tick in parallel across cores; the host stays at fixed-step
+  so it yields cores. `DWARFS_BRIDGE_SERIAL=1` falls back to the one-thread serial
+  scheduler. Threading required making the obs path thread-safe: the crop origin
+  now flows by return value/params instead of a shared `GameState` static, and all
+  reflection caches are pre-bound on the host thread before workers start.
+  Measured ~1.7× serial at 10 worlds under heavy sim (`action_repeat=32`); the gap
+  widens with heavier sim and with real multi-process training (where Python isn't
+  a single-event-loop bottleneck).
+- **Error isolation** — a STEP whose sim throws ends that episode with a terminated
+  reply instead of hanging the env; a world crashing is caught and parked without
+  taking down its siblings or the host.
 - **Python M-ports** — [python/dwarfs_env.py](../python/dwarfs_env.py)
   `make_world_env(n)` launches **one** game hosting N worlds and N workers
   connecting to ports `8765..8765+N-1`; [python/train.py](../python/train.py)
@@ -164,22 +178,22 @@ hardening, not "will it work."
 4. ✅ **Correctness check.** `multiworld_test.py` — isolation/divergence/parity all
    pass at 10 worlds; single-instance `fake_env.py` unchanged.
 5. ✅ **Python side.** `make_world_env` + `--multiworld`.
-6. ◐ **Robustness (partial).** Per-world logging (one log per port) and graceful
-   teardown (Python owns the one process; QUIT parks a world) are in. A throwing
-   command is caught in `World.Pump` and the world is parked without taking down
-   siblings. Still to harden: a hard crash inside `DriveFrame`, and rebuild-on-
-   demand for a parked world.
+6. ✅ **Robustness.** Per-world logging (one log per port), graceful teardown
+   (Python owns the one process; QUIT parks a world), error isolation (a throwing
+   STEP ends the episode with a reply; a crash is caught and the world parked
+   without touching siblings). Open: rebuild-on-demand for a parked world.
 
-### Next: throughput (thread the worlds)
+### Throughput (threaded) — done
 
-The scheduler is **serial** — all N worlds' sim runs on one core, so per-world
-throughput falls as N grows (10 worlds ≈ 28 steps/s each, 276/s aggregate at
-`action_repeat=4`). This is correct and matches the proven-safe spike, but it
-doesn't yet use the CPU-scaling headroom that is the whole point. The throughput
-upgrade is to run each world on its own thread (the per-world `Pump`/drive logic is
-already factored for it). That depends on **§6 shared-infra thread-safety** holding
-under concurrency — verify with a threaded re-run of the isolation test before
-trusting it.
+Each world runs on its own thread (`World.RunLoop`); the host stays at fixed-step so
+it yields cores. `DWARFS_BRIDGE_SERIAL=1` forces the old serial scheduler. Measured
+at 10 worlds with the concurrent driver: ~1.7× serial under heavy sim
+(`action_repeat=32`: ~21k vs ~12.5k sim-frames/s aggregate), roughly even at light
+load where socket round-trips dominate. The gap widens with heavier per-frame sim
+(bigger maps, more entities) and with real `SubprocVecEnv` training, where each
+worker has its own Python process for I/O + inference instead of sharing one asyncio
+loop. Determinism is preserved: same-seed worlds die at the identical step whether
+serial or threaded.
 
 ---
 
@@ -191,21 +205,24 @@ trusting it.
   reports the pristine generated `time_left` (18900) while a normal game reports
   18899 because its menu→game fade burns one frame first. A 1-tick start offset,
   irrelevant to training.
-- ✅ **Isolation (no-combat regime)** — verified under stepping at 10 worlds: two
-  same-seed worlds stay byte-identical for a full run while eight other seeds run
-  alongside; each distinct seed yields a distinct map.
-- **Throughput / scaling** — measured serial: 10 worlds ≈ 276 steps/s aggregate
-  (~28/s each) at `action_repeat=4`, one core. Threading across cores is the open
-  upgrade (§5).
+- ✅ **Isolation (no-combat regime), serial AND threaded** — verified under
+  stepping at 10 worlds, worlds ticking truly in parallel: two same-seed worlds stay
+  byte-identical for a full run (and die at the identical step) while eight other
+  seeds run alongside; each distinct seed yields a distinct map.
+- ✅ **Shared-infra mutation under concurrency** — the obs path's one shared mutable
+  (the crop static) is gone, and reflection caches are pre-bound off-thread; the
+  per-world entity lists are isolated while shared content is read-only. The
+  threaded isolation test passing is the evidence nothing obs/reward-affecting is
+  written across worlds. (`GenerateLevel` still calls shared `xSoundSystem` — audio
+  only, doesn't touch obs/reward.)
+- **Throughput / scaling** — threaded ~1.7× serial at 10 worlds under heavy sim on
+  this machine; not yet profiled for the core-count ceiling or for the harder
+  difficulties' 1000² maps. Longer-run and many-more-worlds scaling unmeasured.
 - **Enemy/combat path** under multi-world — still deferred; monster caves are rare,
   so a dwarf reliably digging into one needs a much longer game than the tests run.
-  Validate once long runs are cheap. Re-verify isolation with combat active.
-- **Shared-infra mutation under concurrency** — the serial scheduler is safe (it's
-  what the spike proved). Threading the worlds assumes shared fields (device,
-  sound, textures, fonts) are read-only during sim; `GenerateLevel` does call the
-  shared `xSoundSystem.StartGame()`, which is harmless for headless correctness but
-  is a write to shared state — confirm nothing shared that affects obs/reward is
-  written per-world before trusting the threaded driver.
+  Note a city *death* (flood) now exercises the game-over path correctly; full
+  combat (enemies spawning, the 2 static enemy-ID counters) is still unvalidated
+  under concurrency. Re-verify isolation with combat active.
 
 ---
 

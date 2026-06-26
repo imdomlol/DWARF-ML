@@ -32,7 +32,10 @@ def default_game_exe():
 
 BASE_PORT = 8765
 STEPS = 400
-ACTION_REPEAT = 4
+# action_repeat is the per-step sim-frame burst; raise it (arg 2) to make the sim
+# the bottleneck instead of socket round-trips, which is where threading pulls
+# ahead of the serial scheduler
+ACTION_REPEAT = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 
 # what a normal single-instance Easy / m5 / seed-42 game reports on its first
 # observation (captured from fake_env.py against a plain patched game). a detached
@@ -148,10 +151,12 @@ async def run(n):
         t0 = time.perf_counter()
         drift_step = None
         for step in range(STEPS):
-            states = []
-            for i, s in enumerate(servers):
-                st = await s.request({"command": "STEP", "action": 0})
-                states.append(st)
+            # fire all N worlds' steps at once and await them together, so the
+            # worlds actually tick in parallel -- this is how SubprocVecEnv drives
+            # them in training, and the only honest throughput measurement (a
+            # sequential driver would just measure socket round-trip latency)
+            states = await asyncio.gather(
+                *(s.request({"command": "STEP", "action": 0}) for s in servers))
             if drift_step is None and summary(states[0]) != summary(states[1]):
                 drift_step = step
             if any(st["terminated"] for st in states):
@@ -168,9 +173,11 @@ async def run(n):
         end0, end1 = summary(states[0]), summary(states[1])
         print(f"world0 end: {end0}")
         print(f"world1 end: {end1}")
-        print(f"\nthroughput: {total_steps} world-steps in {dt:.2f}s = "
-              f"{total_steps / dt:.0f} world-steps/s aggregate "
-              f"({(step + 1) / dt:.0f}/s per world x {n})")
+        frames = total_steps * ACTION_REPEAT
+        print(f"\nthroughput (action_repeat={ACTION_REPEAT}): {total_steps} "
+              f"world-steps in {dt:.2f}s = {total_steps / dt:.0f} world-steps/s "
+              f"({(step + 1) / dt:.0f}/s per world x {n}); "
+              f"{frames / dt:.0f} sim-frames/s aggregate")
 
         for s in servers:
             try:
@@ -184,8 +191,13 @@ async def run(n):
             game.terminate()
         except Exception:
             pass
+        # bound teardown so a slow server close can't hang the whole run after the
+        # verdict has already been printed
         for cm in cms:
-            await cm.__aexit__(None, None, None)
+            try:
+                await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

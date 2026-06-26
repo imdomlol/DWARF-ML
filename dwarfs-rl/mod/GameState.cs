@@ -92,18 +92,25 @@ namespace DwarfsMod
             }
         }
 
-        // where the last crop window sat on the full map so actions given in
-        // window coords can get translated back to map tiles
-        public static int LastCropX;
-        public static int LastCropY;
-
         // one shot diagnostic, logs mask coverage on the next grid read
         public static bool LogNextGrid;
 
-        // one combined code per cell, cropped to a w x h window centered on the
-        // city. row major (row * w + col) to match how the env reshapes it
+        // convenience for callers that dont need the crop origin back (the spike)
         public static int[] ReadGrid(object game, int w, int h)
         {
+            int cropX, cropY;
+            return ReadGrid(game, w, h, out cropX, out cropY);
+        }
+
+        // one combined code per cell, cropped to a w x h window centered on the
+        // city. row major (row * w + col) to match how the env reshapes it. the
+        // crop origin comes back via out params (NOT a shared static) so worlds
+        // running on separate threads can't clobber each other's crop, and so the
+        // matching dwarf/enemy layers read against the very same window
+        public static int[] ReadGrid(object game, int w, int h, out int cropX, out int cropY)
+        {
+            cropX = 0;
+            cropY = 0;
             var outGrid = new int[w * h];
             if (!Bind(game)) return outGrid;
 
@@ -130,8 +137,8 @@ namespace DwarfsMod
             }
             int x0 = Clamp(cx - w / 2, 0, Math.Max(0, mapW - w));
             int y0 = Clamp(cy - h / 2, 0, Math.Max(0, mapH - h));
-            LastCropX = x0;
-            LastCropY = y0;
+            cropX = x0;
+            cropY = y0;
 
             int masked = 0;
             for (int row = 0; row < h; row++)
@@ -170,9 +177,9 @@ namespace DwarfsMod
 
         // a second layer the same size as ReadGrid marking where our dwarves
         // are, 0 nobody, 1 a regular (digger), 2 a warrior, warrior wins if they
-        // share a tile. no fog masking, you always see your own dwarves. uses the
-        // crop origin from the last ReadGrid call so call this right after it
-        public static int[] ReadDwarfGrid(object game, int w, int h)
+        // share a tile. no fog masking, you always see your own dwarves. pass the
+        // crop origin ReadGrid returned so this lands on the same window
+        public static int[] ReadDwarfGrid(object game, int w, int h, int cropX, int cropY)
         {
             var outGrid = new int[w * h];
             if (!Bind(game)) return outGrid;
@@ -181,7 +188,7 @@ namespace DwarfsMod
                 var list = fDwarfList.GetValue(game) as IList;
                 if (list == null || fDwarfPos == null || fDwarfClass == null)
                     return outGrid;
-                int x0 = LastCropX, y0 = LastCropY;
+                int x0 = cropX, y0 = cropY;
                 for (int i = 0; i < list.Count; i++)
                 {
                     object d = list[i];
@@ -202,9 +209,9 @@ namespace DwarfsMod
         // enemy layer, same idea as the dwarf one, 0 none, 1 a minion, 2 a boss,
         // boss wins a shared tile. we only mark the ones a human can actually see,
         // the game hides enemies that are underground or fully stealthed
-        // (m_fStealthCounter >= 1000) so we skip those, no xray. also depends on
-        // the crop from the last ReadGrid call
-        public static int[] ReadEnemyGrid(object game, int w, int h)
+        // (m_fStealthCounter >= 1000) so we skip those, no xray. pass the same crop
+        // origin ReadGrid returned
+        public static int[] ReadEnemyGrid(object game, int w, int h, int cropX, int cropY)
         {
             var outGrid = new int[w * h];
             if (!Bind(game)) return outGrid;
@@ -213,7 +220,7 @@ namespace DwarfsMod
                 var list = fEnemyList.GetValue(game) as IList;
                 if (list == null || fEnemyPos == null || fEnemyCategory == null)
                     return outGrid;
-                int x0 = LastCropX, y0 = LastCropY;
+                int x0 = cropX, y0 = cropY;
                 for (int i = 0; i < list.Count; i++)
                 {
                     object e = list[i];

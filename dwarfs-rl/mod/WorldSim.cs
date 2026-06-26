@@ -17,6 +17,22 @@ namespace DwarfsMod
         const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         const BindingFlags Pub = BindingFlags.Public | BindingFlags.Instance;
 
+        // the per-world entity lists -- exactly the ones Game1.ClearGame() clears.
+        // these MUST be reallocated per world so the game's own ClearGame().Clear()
+        // hits our lists, not the host's, and so the sim mutates our state alone.
+        // every OTHER List<> field on Game1 (death-tip textures, high-score tables,
+        // input buffers, ...) is shared read-only content -- reallocating those to
+        // empty is what used to crash death handling (SelectToolTip indexing an
+        // emptied txWaterDeathTips), so we leave them sharing the host's copies.
+        static readonly string[] EntityLists =
+        {
+            "lArrow", "lDwarf", "lCave", "lDuel", "lDynamicEffects", "lDynamite",
+            "lEnemy", "lHole", "lGrowingGrass", "lLavaFront", "lLavaMark", "lMine",
+            "lPointFront", "lStaticEffects", "lStoneWall", "lWallMerge", "lWaterFront",
+            "lTreasure", "lWarning", "lDisarmedWaterSource", "lDisarmedLavaSource",
+            "lParticles", "lParticlesGround", "lOutposts", "lDynamicMaps",
+        };
+
         static bool bound, bindFailed;
         static Type tGame;
         static ConstructorInfo ctor;
@@ -95,14 +111,10 @@ namespace DwarfsMod
                 {
                     try { fi.SetValue(g, fi.GetValue(primary)); } catch { }
                 }
-                // ...then give this world its own copy of every List<> field, so the
-                // game's own ClearGame().Clear() calls hit OUR lists, not the host's
-                foreach (FieldInfo fi in tGame.GetFields(Any))
-                {
-                    Type ft = fi.FieldType;
-                    if (ft.IsGenericType && ft.GetGenericTypeDefinition() == typeof(List<>))
-                        try { fi.SetValue(g, Activator.CreateInstance(ft)); } catch { }
-                }
+                // ...then give this world its own copy of just the entity lists the
+                // game treats as per-game state (the ones ClearGame clears), leaving
+                // shared content lists alone
+                foreach (string name in EntityLists) ReallocFresh(g, name);
                 // and fresh per-world controllers + a placeholder map (SetDifficulty
                 // resizes it to the difficulty's real playfield on the first RESET)
                 ReallocFresh(g, "xTowerDefense");

@@ -49,6 +49,10 @@ namespace DwarfsMod
         // nothing; it builds N detached trainee worlds that share its infra and
         // ticks them all in lockstep from its Update hook, each on its own port.
         static bool multiWorld;
+        // default: one thread per world, so worlds tick in parallel across cores.
+        // DWARFS_BRIDGE_SERIAL=1 falls back to ticking them all on the game thread
+        // (the proven-safe serial scheduler) for debugging / a conservative run.
+        static bool serialScheduler;
         static readonly List<World> trainees = new List<World>();
         static object multiHostGame;
         static bool traineesBuilt;
@@ -82,6 +86,7 @@ namespace DwarfsMod
                 if (!string.IsNullOrEmpty(wc) && int.TryParse(wc, out parsedWc) && parsedWc > 1)
                     worldCount = parsedWc;
                 multiWorld = worldCount > 1;
+                serialScheduler = Environment.GetEnvironmentVariable("DWARFS_BRIDGE_SERIAL") == "1";
 
                 if (!multiWorld)
                 {
@@ -98,7 +103,8 @@ namespace DwarfsMod
                     // the Game1 instances get built on the first Update hook (once
                     // the real host has loaded content); the sockets can connect now
                     Log("boot: multi-world, " + worldCount + " worlds on ports " +
-                        port + ".." + (port + worldCount - 1));
+                        port + ".." + (port + worldCount - 1) +
+                        (serialScheduler ? " (serial)" : " (threaded)"));
                     for (int i = 0; i < worldCount; i++)
                     {
                         int wp = port + i;
@@ -132,8 +138,18 @@ namespace DwarfsMod
             if (multiWorld)
             {
                 if (!traineesBuilt) BuildTrainees(game);
-                KeepFast(game); // the driver spins fast so trainees tick quickly
-                SchedulerTick();
+                if (serialScheduler)
+                {
+                    KeepFast(game); // the driver spins fast so trainees tick quickly
+                    SchedulerTick();
+                }
+                else
+                {
+                    // threaded: each world ticks on its own thread, this host just
+                    // owns the device. let it idle a touch so it doesnt peg a core
+                    // that a worker could use
+                    Thread.Sleep(8);
+                }
                 return;
             }
 
@@ -165,9 +181,35 @@ namespace DwarfsMod
                 }
             }
             rendering = false;   // headless driver, no window
-            FastClock(hostGame); // strip xna's throttles so the loop runs full speed
+
+            // pre-bind every reflection cache here, on the host thread, so the
+            // worker threads only ever READ them. lazy first-binds racing across
+            // threads is the one place the shared statics could tear
+            GameState.Bind(hostGame);
+            GameControl.GameStateId(hostGame); // triggers GameControl.Bind
+            GameAction.Warmup(hostGame);
+
             traineesBuilt = true;
-            Log("multiworld: built " + built + " of " + trainees.Count + " trainee worlds");
+
+            if (serialScheduler)
+            {
+                FastClock(hostGame); // serial: the one driver thread runs flat out
+            }
+            else
+            {
+                // threaded: one dedicated thread per world. the host stays at xna's
+                // default fixed-step (~60fps) so it yields cores to the workers
+                foreach (World w in trainees)
+                {
+                    if (w.Game == null) continue;
+                    var t = new Thread(w.RunLoop);
+                    t.IsBackground = true;
+                    t.Name = "world-" + w.Port;
+                    t.Start();
+                }
+            }
+            Log("multiworld: built " + built + " of " + trainees.Count +
+                " trainee worlds" + (serialScheduler ? " (serial)" : " (threaded, one thread each)"));
         }
 
         // one pass of the multi-world loop: pump every trainee once. if nobody had

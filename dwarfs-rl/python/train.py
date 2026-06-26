@@ -3,7 +3,12 @@ import os
 
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import (
+	BaseCallback,
+	CallbackList,
+	CheckpointCallback,
+)
+from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import VecMonitor
 
@@ -55,7 +60,8 @@ def resolve_power(level: str):
 
 def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 		instances: int = None, power: str = None, invalid_action: float = 0.1,
-		multiworld: bool = False, tensorboard: bool = False, logdir: str = "./runs") -> None:
+		multiworld: bool = False, tensorboard: bool = False, logdir: str = "./runs",
+		resume: bool = False, checkpoint_freq: int = 0, run_name: str = "ppo") -> None:
 	# The mod connects over websocket and provides observations/rewards.
 	# One instance attaches to a manually launched game; more than one spins up
 	# that many game processes and trains across all of them at once.
@@ -123,19 +129,58 @@ def train_agent(total_timesteps: int, render: bool = False, render_fps: int = 0,
 	tb_log = logdir if tensorboard else None
 	if tensorboard:
 		print(f"TensorBoard logging to {logdir} -- run: tensorboard --logdir {logdir}")
-	model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003,
-		tensorboard_log=tb_log)
+
+	# --resume continues an existing dwarfs_agent.zip instead of starting random.
+	# PPO.load restores the saved num_timesteps; we pair it with
+	# reset_num_timesteps=False below so the counter and the TB x-axis keep going
+	# rather than restarting at 0. Without --resume (the default) we always start
+	# fresh, so a run never silently continues a stale model.
+	save_exists = os.path.exists("dwarfs_agent.zip")
+	resuming = resume and save_exists
+	if resume and not save_exists:
+		print("--resume given but dwarfs_agent.zip not found; starting a fresh model.")
+	if resuming:
+		print("Resuming from dwarfs_agent.zip (continuing timesteps).")
+		model = PPO.load("dwarfs_agent", env=env, tensorboard_log=tb_log)
+	else:
+		model = PPO("MultiInputPolicy", env, verbose=1, learning_rate=0.0003,
+			tensorboard_log=tb_log)
+
+	# SB3 auto-increments the run folder (ppo_1, ppo_2, ...) on every learn(), which
+	# would split a resumed run into a separate TB line. Configure the logger by
+	# hand to point at a single stable folder (logdir/run_name) and reuse it across
+	# resumes, so a stopped-and-resumed run shows up as ONE continuous curve. A
+	# manually set logger also makes learn() ignore tb_log_name entirely.
+	if tensorboard:
+		run_dir = os.path.join(logdir, run_name)
+		model.set_logger(configure(run_dir, ["stdout", "tensorboard"]))
+		print(f"TensorBoard run dir: {run_dir} (reused across --resume).")
+
+	# CheckpointCallback periodically dumps the model to ./checkpoints/ so a crash or
+	# Ctrl+C loses at most checkpoint_freq steps. Its save_freq counts per-env-step
+	# calls, so divide by the env count to get a real total-step interval.
+	callbacks = [GameMetricsCallback()]
+	if checkpoint_freq > 0:
+		n_envs = getattr(env, "num_envs", 1)
+		save_freq = max(checkpoint_freq // n_envs, 1)
+		os.makedirs("./checkpoints", exist_ok=True)
+		callbacks.append(CheckpointCallback(save_freq=save_freq,
+			save_path="./checkpoints", name_prefix="dwarfs_agent"))
+		print(f"Checkpointing to ./checkpoints every ~{checkpoint_freq} total steps.")
 
 	print("Training the AI...")
-	model.learn(total_timesteps=total_timesteps, callback=GameMetricsCallback(),
-		tb_log_name="ppo")
-	print("Training complete.")
-
-	print("Saving the AI...")
-	model.save("dwarfs_agent")
-	print("Model saved.")
-
-	env.close()
+	# try/finally so an interrupted or crashed run still saves what it has -- without
+	# it a Ctrl+C/exception throws away the whole run.
+	try:
+		model.learn(total_timesteps=total_timesteps,
+			callback=CallbackList(callbacks),
+			reset_num_timesteps=not resuming)
+		print("Training complete.")
+	finally:
+		print("Saving the AI...")
+		model.save("dwarfs_agent")
+		print("Model saved.")
+		env.close()
 
 
 
@@ -185,6 +230,17 @@ def build_parser() -> argparse.ArgumentParser:
 			"score) to --logdir. View with: tensorboard --logdir ./runs")
 	parser.add_argument("--logdir", default="./runs",
 		help="Directory for TensorBoard logs (default ./runs).")
+	parser.add_argument("--resume", action="store_true",
+		help="Continue training from dwarfs_agent.zip if it exists (keeps the timestep "
+			"counter and TB curve going), instead of starting a fresh random model. "
+			"Default (no flag) always starts fresh so a stale model is never silently "
+			"continued.")
+	parser.add_argument("--checkpoint-freq", type=int, default=0,
+		help="Save a checkpoint to ./checkpoints every N total steps (0 = off). "
+			"Crash/Ctrl+C safety on top of the final save.")
+	parser.add_argument("--run-name", default="ppo",
+		help="TensorBoard run subfolder under --logdir (default 'ppo'). Reused across "
+			"--resume so a resumed run is one continuous curve, not a new ppo_N line.")
 	return parser
 
 
@@ -195,7 +251,8 @@ def main() -> None:
 	else:
 		train_agent(args.timesteps, render=args.render, render_fps=args.render_fps,
 			instances=args.instances, power=args.power, invalid_action=args.invalid_action,
-			multiworld=args.multiworld, tensorboard=args.tensorboard, logdir=args.logdir)
+			multiworld=args.multiworld, tensorboard=args.tensorboard, logdir=args.logdir,
+			resume=args.resume, checkpoint_freq=args.checkpoint_freq, run_name=args.run_name)
 
 
 if __name__ == "__main__":

@@ -23,5 +23,8 @@ dwarfs_agent.zip
 # TensorBoard logs
 runs/
 
+# Periodic training checkpoints (CheckpointCallback saves .zip here)
+checkpoints/
+
 # AI
 .claude

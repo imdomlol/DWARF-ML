@@ -98,6 +98,11 @@ the required fields (the env indexes straight into them)
   "dwarves": 3,                 // live dwarf count
   "time_left": 18899,           // episode countdown in frames
   "city_hp": 510,               // base health
+  "cost_wall": 30,              // gold cost to place a wall (fixed per difficulty)
+  "cost_dynamite": 50,          // gold cost to place dynamite (fixed per difficulty)
+  "cost_arrow": 10,             // gold cost to place a green arrow (fixed per difficulty)
+  "cost_tower": 200,            // gold cost to place the NEXT tower (escalates each build)
+  "cost_warrior": 40,           // gold cost to spawn a warrior (fixed per difficulty)
   "action_ok": true,            // did the last action actually apply
   "crop_x": 220, "crop_y": 230, // where the window sits on the full map
   "tick": 123                   // frames elapsed, handy for debugging

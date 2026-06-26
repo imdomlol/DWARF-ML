@@ -527,6 +527,28 @@ namespace DwarfsMod
             }
         }
 
+        // read the five action costs off the live game. cost_tower escalates each
+        // time a tower is built; the others are fixed for the run. returns false
+        // (and zeros) if the binds haven't fired yet, which only happens before
+        // the first episode so the env will just see zeros that step
+        public static bool ReadCosts(object game,
+            out int wall, out int dynamite, out int arrow, out int tower, out int warrior)
+        {
+            wall = dynamite = arrow = tower = warrior = 0;
+            if (!Bind(game)) return false;
+            if (!BindEx(game)) return false;
+            try
+            {
+                wall     = (int)fCostWall.GetValue(game);
+                dynamite = (int)fCostDynamite.GetValue(game);
+                arrow    = (int)fCostArrow.GetValue(game) + (int)fCostArrowStart.GetValue(game);
+                tower    = (int)fCostOutpost.GetValue(game);
+                warrior  = (int)fCostWarrior.GetValue(game);
+                return true;
+            }
+            catch { return false; }
+        }
+
         // cannon strike (6d). the agent gives a target tile, we find an outpost
         // close enough to lob from (inside the cannon radius) that still has a
         // warrior sitting home, and fire all its eligible warriors at the spot

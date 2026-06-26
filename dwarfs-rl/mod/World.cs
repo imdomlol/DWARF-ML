@@ -577,6 +577,10 @@ namespace DwarfsMod
             StatDwarves = dwarves;
             StatTimeLeft = timeLeft;
 
+            int costWall, costDynamite, costArrow, costTower, costWarrior;
+            GameAction.ReadCosts(game, out costWall, out costDynamite,
+                out costArrow, out costTower, out costWarrior);
+
             var sb = new StringBuilder(ObsW * ObsH * 2 + 256);
             sb.Append("{\"map_grid\":");
             // crop comes back by value so concurrent worlds on their own threads
@@ -598,6 +602,11 @@ namespace DwarfsMod
             sb.Append(",\"dwarves\":").Append(dwarves);
             sb.Append(",\"time_left\":").Append(timeLeft);
             sb.Append(",\"city_hp\":").Append(GameState.CityHP(game));
+            sb.Append(",\"cost_wall\":").Append(costWall);
+            sb.Append(",\"cost_dynamite\":").Append(costDynamite);
+            sb.Append(",\"cost_arrow\":").Append(costArrow);
+            sb.Append(",\"cost_tower\":").Append(costTower);
+            sb.Append(",\"cost_warrior\":").Append(costWarrior);
             sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
             sb.Append(",\"crop_x\":").Append(cropX);
             sb.Append(",\"crop_y\":").Append(cropY);
@@ -633,6 +642,7 @@ namespace DwarfsMod
             sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append(",\"terminated\":true,\"truncated\":false");
             sb.Append(",\"gold\":0,\"score\":0,\"dwarves\":0,\"time_left\":0,\"city_hp\":0");
+            sb.Append(",\"cost_wall\":0,\"cost_dynamite\":0,\"cost_arrow\":0,\"cost_tower\":0,\"cost_warrior\":0");
             sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
             sb.Append(",\"crop_x\":").Append(cropX).Append(",\"crop_y\":").Append(cropY);
             sb.Append(",\"tick\":").Append(frame);

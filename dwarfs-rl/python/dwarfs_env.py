@@ -110,7 +110,7 @@ class DwarfsEnv(gym.Env):
             "grid": gym.spaces.Box(0, 6, shape=(GRID_H, GRID_W), dtype=np.int32),
             "dwarves": gym.spaces.Box(0, 2, shape=(GRID_H, GRID_W), dtype=np.int32),
             "enemies": gym.spaces.Box(0, 2, shape=(GRID_H, GRID_W), dtype=np.int32),
-            "stats": gym.spaces.Box(-np.inf, np.inf, shape=(4,), dtype=np.float32),
+            "stats": gym.spaces.Box(-np.inf, np.inf, shape=(9,), dtype=np.float32),
         })
         # action, x column, y row. idle ignores the coordinates.
         # 14 action types: 0 idle, 1 dynamite, 2 wall, 3-6 arrow up/right/down/left,
@@ -144,7 +144,10 @@ class DwarfsEnv(gym.Env):
         dwarves = np.asarray(state["dwarf_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
         enemies = np.asarray(state["enemy_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
         stats = np.array([state["gold"], state["dwarves"],
-                          state["time_left"], state["city_hp"]],
+                          state["time_left"], state["city_hp"],
+                          state["cost_wall"], state["cost_dynamite"],
+                          state["cost_arrow"], state["cost_tower"],
+                          state["cost_warrior"]],
                          dtype=np.float32)
         info = {"score": state["score"], "action_ok": state["action_ok"],
                 "crop": (state["crop_x"], state["crop_y"]), "tick": state["tick"]}

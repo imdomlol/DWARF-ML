@@ -27,9 +27,9 @@ namespace DwarfsMod
         // no window/fade involved.
         internal enum Mode { Hosted, Detached }
 
-        // observation crop around the city. doms env expects 40 rows x 60 cols
-        const int ObsW = 60;
-        const int ObsH = 40;
+        // 4 cameras, each 30x30, centered on extreme digger dwarves (N/E/S/W)
+        const int CamW = 30;
+        const int CamH = 30;
 
         // give up on lockstep if the env goes quiet for this long, that way a dead
         // trainer hands the game back instead of freezing it forever
@@ -82,11 +82,15 @@ namespace DwarfsMod
         float rewardDeathPenalty = 1500f;
         float rewardInvalidAction;
         float rewardHazard;    // charged per active water/lava front each step
+        float rewardInstantSeal; // bonus per instant-seal achievement triggered this step
+        int lastCaveCount;     // lCave list count at last BuildState, for cave event detection
+        int lastInstantSeal;   // iInstantSeal counter at last StepReward, for delta
+        int stepInstantSealDelta; // filled by StepReward, read by the next BuildState call
 
-        // where the last obs crop sat on the full map, per world, so actions given
-        // in window coords map back to map tiles without picking up a different
-        // world's crop. captured off GameState's transient statics each BuildState
-        int cropX, cropY;
+        // per-camera crop origins on the full map (0=N 1=E 2=S 3=W, -1 means no dwarf).
+        // updated each BuildState so the next action translates window coords correctly
+        readonly int[] camOriginX = new int[] { -1, -1, -1, -1 };
+        readonly int[] camOriginY = new int[] { -1, -1, -1, -1 };
 
         // last reported scalars, the control panel reads these off the host world
         // (via Bridge) so theyre at most one step stale
@@ -281,9 +285,10 @@ namespace DwarfsMod
                 case "STEP":
                 {
                     int action = MiniJson.GetInt(cmd, "action", 0);
+                    int camera = MiniJson.GetInt(cmd, "camera", 0);
                     int x = MiniJson.GetInt(cmd, "x", -1);
                     int y = MiniJson.GetInt(cmd, "y", -1);
-                    lastActionOk = ApplyAction(game, action, x, y);
+                    lastActionOk = ApplyAction(game, action, camera, x, y);
                     stepFramesLeft = actionRepeat;
                     return true;
                 }
@@ -385,13 +390,14 @@ namespace DwarfsMod
                 case "STEP":
                 {
                     int action = MiniJson.GetInt(cmd, "action", 0);
+                    int camera = MiniJson.GetInt(cmd, "camera", 0);
                     int x = MiniJson.GetInt(cmd, "x", -1);
                     int y = MiniJson.GetInt(cmd, "y", -1);
                     bool terminated;
                     float reward;
                     try
                     {
-                        lastActionOk = ApplyAction(game, action, x, y);
+                        lastActionOk = ApplyAction(game, action, camera, x, y);
                         // drive the burst of sim frames by hand, then score + report
                         for (int i = 0; i < actionRepeat; i++)
                         {
@@ -448,6 +454,7 @@ namespace DwarfsMod
             rewardDeathPenalty = MiniJson.GetFloat(cmd, "death_penalty", 1500f);
             rewardInvalidAction = MiniJson.GetFloat(cmd, "invalid_action", 0f);
             rewardHazard = MiniJson.GetFloat(cmd, "hazard_penalty", 0f);
+            rewardInstantSeal = MiniJson.GetFloat(cmd, "instant_seal", 0f);
             return modeStr;
         }
 
@@ -479,53 +486,45 @@ namespace DwarfsMod
                 if (spread > 0)
                     reward -= rewardHazard * spread;
             }
+            int currentSeal = GameState.InstantSealCount(game);
+            stepInstantSealDelta = currentSeal - lastInstantSeal;
+            lastInstantSeal = currentSeal;
+            if (stepInstantSealDelta > 0 && rewardInstantSeal != 0f)
+                reward += stepInstantSealDelta * rewardInstantSeal;
             return reward;
         }
 
-        // coordinates come in relative to the window (thats all the model sees)
-        // so translate to map tiles using where this world's last obs crop sat
-        bool ApplyAction(object game, int action, int x, int y)
+        // translate window-space (camera, x, y) to map coords and dispatch the action.
+        // camera 0-3 selects which of the 4 digger-following views to use;
+        // -1 origin means no digger assigned there, the action is refused
+        bool ApplyAction(object game, int action, int camera, int x, int y)
         {
+            if (action == 0) return true; // idle always fine, coords ignored
+
+            if (camera < 0 || camera >= 4) return false;
+            int ox = camOriginX[camera];
+            int oy = camOriginY[camera];
+            if (ox < 0 || oy < 0) return false; // no digger in this camera slot
+
+            if (x < 0 || y < 0 || x >= CamW || y >= CamH) return false;
+            int mx = ox + x, my = oy + y;
+
             switch (action)
             {
-                case 0:
-                    return true; // idle is always fine
-                case 1:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceDynamite(game, cropX + x, cropY + y);
-                case 2:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceWall(game, cropX + x, cropY + y);
+                case 1: return GameAction.PlaceDynamite(game, mx, my);
+                case 2: return GameAction.PlaceWall(game, mx, my);
                 case 3: // green arrows, 3 up 4 right 5 down 6 left
                 case 4:
                 case 5:
-                case 6:
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceArrow(game, cropX + x, cropY + y, action - 3);
-                case 7: // place tower (outpost)
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.PlaceOutpost(game, cropX + x, cropY + y);
-                case 8: // reinforce wall, patch a damaged wall back to full
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.ReinforceWall(game, cropX + x, cropY + y);
-                // outpost actions, the tile picks which tower
-                case 9: // toggle digger spawner
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostToggleDigger(game, cropX + x, cropY + y);
-                case 10: // spawn warrior
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostSpawnWarrior(game, cropX + x, cropY + y);
-                case 11: // recall all warriors
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostRecall(game, cropX + x, cropY + y);
-                case 12: // cannon strike, tile is the target to fire at
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostCannon(game, cropX + x, cropY + y);
-                case 13: // toggle warrior training
-                    if (x < 0 || y < 0 || x >= ObsW || y >= ObsH) return false;
-                    return GameAction.OutpostToggleTrain(game, cropX + x, cropY + y);
-                default:
-                    return false;
+                case 6: return GameAction.PlaceArrow(game, mx, my, action - 3);
+                case 7: return GameAction.PlaceOutpost(game, mx, my);
+                case 8: return GameAction.ReinforceWall(game, mx, my);
+                case 9: return GameAction.OutpostToggleDigger(game, mx, my);
+                case 10: return GameAction.OutpostSpawnWarrior(game, mx, my);
+                case 11: return GameAction.OutpostRecall(game, mx, my);
+                case 12: return GameAction.OutpostCannon(game, mx, my);
+                case 13: return GameAction.OutpostToggleTrain(game, mx, my);
+                default: return false;
             }
         }
 
@@ -534,10 +533,12 @@ namespace DwarfsMod
             levelGenerated = false;
             hasPendingSeed = false;
             phase = Phase.Running;
-            lastActionOk = true; // don't carry a stale flag into the new episode
+            lastActionOk = true;
             lastScore = GameState.Score(game);
             lastHazardTiles = rewardHazard != 0f ? GameState.HazardTiles(game) : 0;
-            GameState.LogNextGrid = true; // log mask coverage once per episode
+            lastCaveCount = GameState.CaveCount(game);
+            lastInstantSeal = GameState.InstantSealCount(game);
+            stepInstantSealDelta = 0;
             Send(BuildState(game, 0f, false, false));
         }
 
@@ -562,38 +563,79 @@ namespace DwarfsMod
         // ---- protocol ----
 
         // the message the env consumes. every field in it every time cause the
-        // env side indexes straight into this dict. besides the grid we also
-        // ship the scalars the model needs to act on, you cant decide to buy
-        // dynamite without knowing your gold
+        // env side indexes straight into this dict. 4 cameras (30x30 each) centered
+        // on the northmost/eastmost/southmost/westmost digger dwarves, zero-filled
+        // when fewer than 4 diggers exist
         string BuildState(object game, float reward, bool terminated, bool truncated)
         {
-            // read each scalar once, the control panel reuses them off the stats
             int gold = GameState.Gold(game);
             long score = GameState.Score(game);
             int dwarves = GameState.DwarfCount(game);
             int timeLeft = GameState.TimeLeft(game);
-            StatGold = gold;
-            StatScore = score;
-            StatDwarves = dwarves;
-            StatTimeLeft = timeLeft;
+            StatGold = gold; StatScore = score; StatDwarves = dwarves; StatTimeLeft = timeLeft;
 
             int costWall, costDynamite, costArrow, costTower, costWarrior;
             GameAction.ReadCosts(game, out costWall, out costDynamite,
                 out costArrow, out costTower, out costWarrior);
 
-            var sb = new StringBuilder(ObsW * ObsH * 2 + 256);
-            sb.Append("{\"map_grid\":");
-            // crop comes back by value so concurrent worlds on their own threads
-            // never share it; the dwarf/enemy layers read against the same window
-            int cx, cy;
-            MiniJson.AppendIntArray(sb, GameState.ReadGrid(game, ObsW, ObsH, out cx, out cy));
-            sb.Append(",\"dwarf_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadDwarfGrid(game, ObsW, ObsH, cx, cy));
-            sb.Append(",\"enemy_grid\":");
-            MiniJson.AppendIntArray(sb, GameState.ReadEnemyGrid(game, ObsW, ObsH, cx, cy));
-            // keep this world's crop so its next action maps window->map correctly
-            cropX = cx;
-            cropY = cy;
+            // 4 extreme digger positions (N=0 E=1 S=2 W=3), -1 if absent
+            int nx, ny, ex, ey, sx, sy, wx, wy;
+            GameState.FindExtremeDiggers(game,
+                out nx, out ny, out ex, out ey, out sx, out sy, out wx, out wy);
+            int[] dwX = new int[] { nx, ex, sx, wx };
+            int[] dwY = new int[] { ny, ey, sy, wy };
+
+            var terrains = new int[4][];
+            var dwfGrids = new int[4][];
+            var enmGrids = new int[4][];
+            for (int i = 0; i < 4; i++)
+            {
+                if (dwX[i] < 0)
+                {
+                    terrains[i] = new int[CamW * CamH];
+                    dwfGrids[i] = new int[CamW * CamH];
+                    enmGrids[i] = new int[CamW * CamH];
+                    camOriginX[i] = -1;
+                    camOriginY[i] = -1;
+                }
+                else
+                {
+                    int cx, cy;
+                    terrains[i] = GameState.ReadGridAt(game, CamW, CamH, dwX[i], dwY[i], out cx, out cy);
+                    dwfGrids[i] = GameState.ReadDwarfGrid(game, CamW, CamH, cx, cy);
+                    enmGrids[i] = GameState.ReadEnemyGrid(game, CamW, CamH, cx, cy);
+                    camOriginX[i] = cx;
+                    camOriginY[i] = cy;
+                }
+            }
+
+            // cave event: did a new cave open since the last step?
+            int currentCaveCount = GameState.CaveCount(game);
+            int caveOpened = 0, caveX = -1, caveY = -1;
+            if (currentCaveCount > lastCaveCount)
+            {
+                int caveType;
+                GameState.GetCave(game, 0, out caveX, out caveY, out caveType);
+                caveOpened = caveType;
+            }
+            lastCaveCount = currentCaveCount;
+
+            var sb = new StringBuilder(4 * 3 * CamW * CamH * 2 + 512);
+            for (int i = 0; i < 4; i++)
+            {
+                sb.Append(i == 0 ? "{" : ",");
+                sb.Append("\"cam").Append(i).Append("_terrain\":");
+                MiniJson.AppendIntArray(sb, terrains[i]);
+                sb.Append(",\"cam").Append(i).Append("_dwarves\":");
+                MiniJson.AppendIntArray(sb, dwfGrids[i]);
+                sb.Append(",\"cam").Append(i).Append("_enemies\":");
+                MiniJson.AppendIntArray(sb, enmGrids[i]);
+            }
+            sb.Append(",\"cam_origins\":[");
+            sb.Append(nx).Append(',').Append(ny).Append(',');
+            sb.Append(ex).Append(',').Append(ey).Append(',');
+            sb.Append(sx).Append(',').Append(sy).Append(',');
+            sb.Append(wx).Append(',').Append(wy).Append(']');
             sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append(",\"terminated\":").Append(terminated ? "true" : "false");
             sb.Append(",\"truncated\":").Append(truncated ? "true" : "false");
@@ -607,9 +649,11 @@ namespace DwarfsMod
             sb.Append(",\"cost_arrow\":").Append(costArrow);
             sb.Append(",\"cost_tower\":").Append(costTower);
             sb.Append(",\"cost_warrior\":").Append(costWarrior);
+            sb.Append(",\"cave_opened\":").Append(caveOpened);
+            sb.Append(",\"cave_x\":").Append(caveX);
+            sb.Append(",\"cave_y\":").Append(caveY);
+            sb.Append(",\"instant_seal_delta\":").Append(stepInstantSealDelta);
             sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
-            sb.Append(",\"crop_x\":").Append(cropX);
-            sb.Append(",\"crop_y\":").Append(cropY);
             sb.Append(",\"tick\":").Append(frame);
             sb.Append('}');
             return sb.ToString();
@@ -632,19 +676,25 @@ namespace DwarfsMod
         // reply and end the episode when the real state can't be read
         string MinimalTerminatedState(float reward)
         {
-            var sb = new StringBuilder(ObsW * ObsH * 2 + 128);
-            sb.Append("{\"map_grid\":");
-            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
-            sb.Append(",\"dwarf_grid\":");
-            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
-            sb.Append(",\"enemy_grid\":");
-            MiniJson.AppendIntArray(sb, new int[ObsW * ObsH]);
+            var empty = new int[CamW * CamH];
+            var sb = new StringBuilder(4 * 3 * CamW * CamH * 2 + 256);
+            for (int i = 0; i < 4; i++)
+            {
+                sb.Append(i == 0 ? "{" : ",");
+                sb.Append("\"cam").Append(i).Append("_terrain\":");
+                MiniJson.AppendIntArray(sb, empty);
+                sb.Append(",\"cam").Append(i).Append("_dwarves\":");
+                MiniJson.AppendIntArray(sb, empty);
+                sb.Append(",\"cam").Append(i).Append("_enemies\":");
+                MiniJson.AppendIntArray(sb, empty);
+            }
+            sb.Append(",\"cam_origins\":[-1,-1,-1,-1,-1,-1,-1,-1]");
             sb.Append(",\"immediate_reward\":").Append(reward.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append(",\"terminated\":true,\"truncated\":false");
             sb.Append(",\"gold\":0,\"score\":0,\"dwarves\":0,\"time_left\":0,\"city_hp\":0");
             sb.Append(",\"cost_wall\":0,\"cost_dynamite\":0,\"cost_arrow\":0,\"cost_tower\":0,\"cost_warrior\":0");
+            sb.Append(",\"cave_opened\":0,\"cave_x\":-1,\"cave_y\":-1,\"instant_seal_delta\":0");
             sb.Append(",\"action_ok\":").Append(lastActionOk ? "true" : "false");
-            sb.Append(",\"crop_x\":").Append(cropX).Append(",\"crop_y\":").Append(cropY);
             sb.Append(",\"tick\":").Append(frame);
             sb.Append('}');
             return sb.ToString();

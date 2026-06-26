@@ -31,6 +31,11 @@ namespace DwarfsMod
         static MethodInfo mGetScore;
         static FieldInfo fGold;
 
+        // cave tracking: lCave list + Cave field accessors
+        static FieldInfo fCaveList, fCaveOrigin, fCaveType;
+        // PointlessData for iInstantSeal achievement counter
+        static FieldInfo fPointlessData, fInstantSeal;
+
         public static bool Bind(object game)
         {
             if (bound) return true;
@@ -79,6 +84,25 @@ namespace DwarfsMod
                 Type tRes = fResources.FieldType;
                 fGold = tRes.GetField("m_iGold", Priv);
                 mGetScore = tRes.GetMethod("GetScore", Pub);
+
+                // cave list and instant-seal achievement counter (optional, degrade gracefully)
+                fCaveList      = g.GetField("lCave", Priv);
+                fPointlessData = g.GetField("xCurrentGamePointlessData", Priv);
+                try
+                {
+                    if (fCaveList != null)
+                    {
+                        Type tCave = fCaveList.FieldType.GetGenericArguments()[0];
+                        fCaveOrigin = tCave.GetField("m_v2Origin", Pub);
+                        fCaveType   = tCave.GetField("m_iType",   Pub);
+                    }
+                    if (fPointlessData != null)
+                    {
+                        Type tPD = fPointlessData.FieldType;
+                        fInstantSeal = tPD.GetField("iInstantSeal", Pub);
+                    }
+                }
+                catch { }
 
                 bound = fMap != null && fWater != null && fLava != null
                     && fMinerals != null && fTimeLeft != null && fGold != null;
@@ -322,6 +346,134 @@ namespace DwarfsMod
                 return city == null ? 0 : (int)fCityHP.GetValue(city);
             }
             catch { return 0; }
+        }
+
+        // number of caves opened so far this episode
+        public static int CaveCount(object game)
+        {
+            if (!Bind(game) || fCaveList == null) return 0;
+            try
+            {
+                var list = fCaveList.GetValue(game) as IList;
+                return list == null ? 0 : list.Count;
+            }
+            catch { return 0; }
+        }
+
+        // iInstantSeal achievement counter (game increments when a cave is sealed fast)
+        public static int InstantSealCount(object game)
+        {
+            if (!Bind(game) || fPointlessData == null || fInstantSeal == null) return 0;
+            try
+            {
+                object pd = fPointlessData.GetValue(game);
+                return pd == null ? 0 : (int)fInstantSeal.GetValue(pd);
+            }
+            catch { return 0; }
+        }
+
+        // read the cave at reverse index from the end of lCave (0 = most recent).
+        // returns false if the list is empty or the index is out of range
+        public static bool GetCave(object game, int reverseIdx, out int x, out int y, out int type)
+        {
+            x = y = type = -1;
+            if (!Bind(game) || fCaveList == null || fCaveOrigin == null || fCaveType == null)
+                return false;
+            try
+            {
+                var list = fCaveList.GetValue(game) as IList;
+                if (list == null || list.Count == 0) return false;
+                int idx = list.Count - 1 - reverseIdx;
+                if (idx < 0) return false;
+                object cave = list[idx];
+                if (cave == null) return false;
+                object origin = fCaveOrigin.GetValue(cave);
+                x    = (int)(float)fVecX.GetValue(origin);
+                y    = (int)(float)fVecY.GetValue(origin);
+                type = (int)fCaveType.GetValue(cave);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // finds the 4 extreme digger dwarf positions (n=northmost, e=eastmost,
+        // s=southmost, w=westmost). warriors are excluded. returns -1,-1 for any
+        // camera slot where no digger could be assigned
+        public static void FindExtremeDiggers(object game,
+            out int nx, out int ny,
+            out int ex, out int ey,
+            out int sx, out int sy,
+            out int wx, out int wy)
+        {
+            nx = ny = ex = ey = sx = sy = wx = wy = -1;
+            if (!Bind(game)) return;
+            try
+            {
+                var list = fDwarfList.GetValue(game) as IList;
+                if (list == null) return;
+                int bestN = int.MaxValue, bestE = int.MinValue,
+                    bestS = int.MinValue, bestW = int.MaxValue;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    object d = list[i];
+                    if (d == null) continue;
+                    if ((string)fDwarfClass.GetValue(d) == "Warrior") continue;
+                    object pos = fDwarfPos.GetValue(d);
+                    int px = (int)(float)fVecX.GetValue(pos);
+                    int py = (int)(float)fVecY.GetValue(pos);
+                    if (py < bestN) { bestN = py; nx = px; ny = py; }
+                    if (px > bestE) { bestE = px; ex = px; ey = py; }
+                    if (py > bestS) { bestS = py; sx = px; sy = py; }
+                    if (px < bestW) { bestW = px; wx = px; wy = py; }
+                }
+            }
+            catch { nx = ny = ex = ey = sx = sy = wx = wy = -1; }
+        }
+
+        // terrain grid centered on an explicit map position (cx, cy).
+        // same masking rules as ReadGrid. use this for per-dwarf camera views
+        public static int[] ReadGridAt(object game, int w, int h, int cx, int cy,
+            out int cropX, out int cropY)
+        {
+            cropX = 0; cropY = 0;
+            var outGrid = new int[w * h];
+            if (!Bind(game)) return outGrid;
+
+            object map = fGameMap.GetValue(game);
+            if (map == null) return outGrid;
+
+            int mapW = (int)fMapW.GetValue(map);
+            int mapH = (int)fMapH.GetValue(map);
+            var content  = (byte[,])fMap.GetValue(map);
+            var water    = (ushort[,])fWater.GetValue(map);
+            var lava     = (ushort[,])fLava.GetValue(map);
+            var minerals = (byte[,])fMinerals.GetValue(map);
+            var overlay  = (short[,])fOverlay.GetValue(map);
+            if (content == null) return outGrid;
+
+            int x0 = Clamp(cx - w / 2, 0, Math.Max(0, mapW - w));
+            int y0 = Clamp(cy - h / 2, 0, Math.Max(0, mapH - h));
+            cropX = x0; cropY = y0;
+
+            for (int row = 0; row < h; row++)
+            {
+                int y = y0 + row;
+                if (y >= mapH) break;
+                for (int col = 0; col < w; col++)
+                {
+                    int x = x0 + col;
+                    if (x >= mapW) break;
+                    int v;
+                    if (overlay != null && overlay[x, y] != 0 && content[x, y] != 3)
+                        v = 0;
+                    else if (lava[x, y] > 0) v = 6;
+                    else if (water[x, y] > 0) v = 5;
+                    else if (minerals[x, y] > 0) v = 4;
+                    else v = content[x, y];
+                    outGrid[row * w + col] = v;
+                }
+            }
+            return outGrid;
         }
 
         static int Clamp(int v, int lo, int hi)

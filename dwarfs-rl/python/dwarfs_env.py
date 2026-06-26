@@ -1,14 +1,14 @@
 """gymnasium environment for the modded game, ready to train against.
 
 runs the websocket server the mod connects to and turns RESET/STEP into the
-standard gym api. observation is a dict, the 40x60 terrain window, matching 40x60
-dwarf and enemy layers (where the units are) and a small stats vector (gold,
-dwarves, time left, city hp). action is MultiDiscrete,
-what to do + where, (14, 60, 40) = (action, x col, y row). action 0 is idle,
-1 dynamite, 2 wall, 3 to 6 a green arrow up/right/down/left, 7 place tower,
-8 reinforce wall, 9 to 13 are tower actions (toggle digger, spawn warrior,
-recall, cannon, toggle train). the tile picks the tower for 9 to 13, and for
-12 the cannon its the target to fire at. see docs/PROTOCOL.md for the rest.
+standard gym api. observation is a dict with 4 cameras (cam0-cam3, each shape
+(3, 30, 30) stacking terrain/dwarves/enemies) following the northmost/eastmost/
+southmost/westmost digger dwarf, plus a stats vector (9 scalars). cameras are
+zero-filled when fewer than 4 diggers exist. action is MultiDiscrete,
+(14, 4, 30, 30) = (action_type, camera, x_col, y_row). action 0 is idle, 1
+dynamite, 2 wall, 3 to 6 a green arrow up/right/down/left, 7 place tower, 8
+reinforce wall, 9 to 13 are tower actions (toggle digger, spawn warrior, recall,
+cannon, toggle train). see docs/PROTOCOL.md for the full protocol.
 
 mode, difficulty, seed, action_repeat and the reward knobs all get picked per
 env / per reset, see docs/PROTOCOL.md for what they mean.
@@ -26,8 +26,8 @@ import gymnasium as gym
 import numpy as np
 import websockets
 
-GRID_W = 60
-GRID_H = 40
+CAM_W = 30   # camera window width  (tiles)
+CAM_H = 30   # camera window height (tiles)
 
 
 class _Bridge:
@@ -91,7 +91,7 @@ class DwarfsEnv(gym.Env):
 
     def __init__(self, port=8765, mode="m5", difficulty="Easy",
                  action_repeat=8, death_penalty=1500.0, invalid_action=0.0,
-                 hazard_penalty=0.0, render=False, render_fps=0,
+                 hazard_penalty=0.0, instant_seal=0.0, render=False, render_fps=0,
                  game_exe=None, launch_delay=0.0):
         super().__init__()
         self.mode = mode
@@ -100,24 +100,21 @@ class DwarfsEnv(gym.Env):
         self.death_penalty = death_penalty
         self.invalid_action = invalid_action
         self.hazard_penalty = hazard_penalty
+        self.instant_seal = instant_seal
 
-        # grid is the terrain layer, dwarves and enemies are matching layers
-        # marking the units (0 none, 1/2 by type) so the model can see where they
-        # are not just how many. dwarves 1 digger 2 warrior, enemies 1 minion 2
-        # boss. enemies only shows what a human can see, hidden ones are masked.
-        # stats is the small scalar vector
+        # 4 cameras (0=north 1=east 2=south 3=west digger), each (3, CAM_H, CAM_W):
+        # channel 0 = terrain (0-6), channel 1 = dwarves (0-2), channel 2 = enemies (0-2).
+        # cameras are zero-filled when fewer than 4 diggers exist. stats is the
+        # 9-scalar vector (gold, dwarves, time_left, city_hp, 5 costs)
         self.observation_space = gym.spaces.Dict({
-            "grid": gym.spaces.Box(0, 6, shape=(GRID_H, GRID_W), dtype=np.int32),
-            "dwarves": gym.spaces.Box(0, 2, shape=(GRID_H, GRID_W), dtype=np.int32),
-            "enemies": gym.spaces.Box(0, 2, shape=(GRID_H, GRID_W), dtype=np.int32),
+            "cam0": gym.spaces.Box(0, 6, shape=(3, CAM_H, CAM_W), dtype=np.int32),
+            "cam1": gym.spaces.Box(0, 6, shape=(3, CAM_H, CAM_W), dtype=np.int32),
+            "cam2": gym.spaces.Box(0, 6, shape=(3, CAM_H, CAM_W), dtype=np.int32),
+            "cam3": gym.spaces.Box(0, 6, shape=(3, CAM_H, CAM_W), dtype=np.int32),
             "stats": gym.spaces.Box(-np.inf, np.inf, shape=(9,), dtype=np.float32),
         })
-        # action, x column, y row. idle ignores the coordinates.
-        # 14 action types: 0 idle, 1 dynamite, 2 wall, 3-6 arrow up/right/down/left,
-        # 7 place tower, 8 reinforce wall, 9-13 tower actions (toggle digger, spawn
-        # warrior, recall, cannon, toggle train). matches docs/PROTOCOL.md and the
-        # mod's ApplyAction
-        self.action_space = gym.spaces.MultiDiscrete([14, GRID_W, GRID_H])
+        # action_type (14), camera 0-3, x column (0-29), y row (0-29)
+        self.action_space = gym.spaces.MultiDiscrete([14, 4, CAM_W, CAM_H])
 
         self._bridge = _Bridge(port)
         # episodes default to headless on the mod side, the reset carries these
@@ -140,9 +137,11 @@ class DwarfsEnv(gym.Env):
                                           cwd=os.path.dirname(game_exe), env=childenv)
 
     def _unpack(self, state):
-        grid = np.asarray(state["map_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
-        dwarves = np.asarray(state["dwarf_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
-        enemies = np.asarray(state["enemy_grid"], dtype=np.int32).reshape(GRID_H, GRID_W)
+        def cam(i):
+            terrain = np.asarray(state[f"cam{i}_terrain"], dtype=np.int32).reshape(CAM_H, CAM_W)
+            dwarves = np.asarray(state[f"cam{i}_dwarves"], dtype=np.int32).reshape(CAM_H, CAM_W)
+            enemies = np.asarray(state[f"cam{i}_enemies"], dtype=np.int32).reshape(CAM_H, CAM_W)
+            return np.stack([terrain, dwarves, enemies], axis=0)  # (3, CAM_H, CAM_W)
         stats = np.array([state["gold"], state["dwarves"],
                           state["time_left"], state["city_hp"],
                           state["cost_wall"], state["cost_dynamite"],
@@ -150,8 +149,12 @@ class DwarfsEnv(gym.Env):
                           state["cost_warrior"]],
                          dtype=np.float32)
         info = {"score": state["score"], "action_ok": state["action_ok"],
-                "crop": (state["crop_x"], state["crop_y"]), "tick": state["tick"]}
-        return {"grid": grid, "dwarves": dwarves, "enemies": enemies,
+                "cam_origins": state["cam_origins"],
+                "cave_opened": state["cave_opened"],
+                "cave_x": state["cave_x"], "cave_y": state["cave_y"],
+                "instant_seal_delta": state["instant_seal_delta"],
+                "tick": state["tick"]}
+        return {"cam0": cam(0), "cam1": cam(1), "cam2": cam(2), "cam3": cam(3),
                 "stats": stats}, info
 
     def reset(self, seed=None, options=None, timeout=None):
@@ -162,6 +165,7 @@ class DwarfsEnv(gym.Env):
                "death_penalty": self.death_penalty,
                "invalid_action": self.invalid_action,
                "hazard_penalty": self.hazard_penalty,
+               "instant_seal": self.instant_seal,
                "render": self._render,
                "render_fps": self._render_fps}
         if seed is not None:
@@ -176,7 +180,8 @@ class DwarfsEnv(gym.Env):
     def step(self, action):
         a = np.asarray(action).ravel()
         state = self._bridge.request({"command": "STEP", "action": int(a[0]),
-                                      "x": int(a[1]), "y": int(a[2])})
+                                      "camera": int(a[1]),
+                                      "x": int(a[2]), "y": int(a[3])})
         obs, info = self._unpack(state)
         return (obs, float(state["immediate_reward"]),
                 bool(state["terminated"]), bool(state["truncated"]), info)

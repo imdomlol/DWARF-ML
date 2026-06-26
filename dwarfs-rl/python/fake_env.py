@@ -12,22 +12,25 @@ import time
 import websockets
 
 STEPS = 3000
+CAM_W, CAM_H = 30, 30
 
 
 def describe(state, label):
-    cells = state["map_grid"]
-    seen = sorted(set(cells))
-    nonzero = sum(1 for c in cells if c)
-    dwarf_cells = state.get("dwarf_grid", [])
-    dwarf_marks = sum(1 for c in dwarf_cells if c)
-    enemy_cells = state.get("enemy_grid", [])
-    enemy_marks = sum(1 for c in enemy_cells if c)
     print(f"{label}: gold={state.get('gold')} score={state.get('score')} "
           f"dwarves={state.get('dwarves')} time_left={state.get('time_left')} "
           f"city_hp={state.get('city_hp')} tick={state.get('tick')}")
-    print(f"   grid: {nonzero}/{len(cells)} nonzero, values: {seen}")
-    print(f"   dwarf layer: {dwarf_marks} marked, values: {sorted(set(dwarf_cells))}")
-    print(f"   enemy layer: {enemy_marks} marked, values: {sorted(set(enemy_cells))}")
+    for i in range(4):
+        terrain = state.get(f"cam{i}_terrain", [])
+        dwarves = state.get(f"cam{i}_dwarves", [])
+        enemies = state.get(f"cam{i}_enemies", [])
+        nonzero = sum(1 for c in terrain if c)
+        dmarks = sum(1 for c in dwarves if c)
+        emarks = sum(1 for c in enemies if c)
+        print(f"   cam{i}: terrain nonzero {nonzero}/{len(terrain)}, "
+              f"dwarves {dmarks} marked, enemies {emarks} marked")
+    print(f"   cam_origins={state.get('cam_origins')} "
+          f"cave_opened={state.get('cave_opened')} "
+          f"instant_seal_delta={state.get('instant_seal_delta')}")
 
 
 async def reset(ws, **kw):
@@ -45,7 +48,9 @@ async def drive(ws):
     rewards = 0.0
     done = 0
     for i in range(STEPS):
-        await ws.send(json.dumps({"command": "STEP", "action": i % 3}))
+        # idle on camera 0, coords 0,0 -- verifies the full roundtrip shape
+        await ws.send(json.dumps({"command": "STEP", "action": 0,
+                                  "camera": 0, "x": 0, "y": 0}))
         state = json.loads(await ws.recv())
         rewards += state["immediate_reward"]
         done = i + 1
@@ -55,9 +60,9 @@ async def drive(ws):
     dt = time.perf_counter() - t0
 
     describe(state, f"after {done} steps")
-    marks = sum(1 for c in state["dwarf_grid"] if c)
-    print(f"dwarf layer: {marks} tiles marked vs {state['dwarves']} live dwarves "
-          f"({'ok' if marks > 0 else 'EMPTY, dwarves not showing up'})")
+    dmarks = sum(1 for c in state.get("cam0_dwarves", []) if c)
+    print(f"cam0 dwarf layer: {dmarks} marked vs {state['dwarves']} live dwarves "
+          f"({'ok' if dmarks > 0 else 'EMPTY (dwarves may all be south of northmost)'})")
     print(f"reward total: {rewards}")
     print(f"{done} steps in {dt:.2f}s = {done / dt:.0f} steps/s "
           f"({dt / done * 1000:.2f} ms per round trip)")
@@ -72,37 +77,43 @@ async def drive(ws):
     await ws.send(json.dumps({"command": "RENDER", "enabled": False, "max_fps": 60}))
     t0 = time.perf_counter()
     for _ in range(120):
-        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        await ws.send(json.dumps({"command": "STEP", "action": 0,
+                                  "camera": 0, "x": 0, "y": 0}))
         state = json.loads(await ws.recv())
     paced = time.perf_counter() - t0
     await ws.send(json.dumps({"command": "RENDER", "enabled": False, "max_fps": 0}))
     t0 = time.perf_counter()
     for _ in range(120):
-        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        await ws.send(json.dumps({"command": "STEP", "action": 0,
+                                  "camera": 0, "x": 0, "y": 0}))
         state = json.loads(await ws.recv())
     free = time.perf_counter() - t0
     print(f"throttle: 120 steps at 60fps took {paced:.2f}s "
           f"({'ok' if paced > 1.6 else 'NOT PACED'}), "
           f"unthrottled took {free:.2f}s ({'ok' if free < paced / 2 else 'STILL SLOW'})")
 
-    # actions. find empty cells near the middle of the window and try to build,
-    # walls cost 20 on easy and dynamite 25 so gold dropping is the proof
-    W, H = 60, 40
-    grid = state["map_grid"]
-    empties = [(c, r) for r in range(H) for c in range(W) if grid[r * W + c] == 1]
-    # closest to the city first, the starting clearing is the only discovered
-    # ground early on. far away "empty" cells are sealed caves you cant touch
-    empties.sort(key=lambda p: (p[0] - 30) ** 2 + (p[1] - 20) ** 2)
-    print(f"action test: {len(empties)} empty cells to try")
+    # actions: use camera 0 (northmost digger). find empty cells in its 30x30 view
+    # and try to build. walls cost 30 on easy and dynamite 50.
+    cam0 = state.get("cam0_terrain", [])
+    empties = [(c, r) for r in range(CAM_H) for c in range(CAM_W)
+               if cam0[r * CAM_W + c] == 1]
+    # prefer cells closer to the camera centre (the tracked dwarf)
+    empties.sort(key=lambda p: (p[0] - CAM_W // 2) ** 2 + (p[1] - CAM_H // 2) ** 2)
+    print(f"action test (cam0): {len(empties)} empty cells to try")
+
+    def step_action(action, camera, cx, cy):
+        return json.dumps({"command": "STEP", "action": action,
+                           "camera": camera, "x": cx, "y": cy})
 
     wall_at = None
     for cx, cy in empties[:100]:
         gold_before = state["gold"]
-        await ws.send(json.dumps({"command": "STEP", "action": 2, "x": cx, "y": cy}))
+        await ws.send(step_action(2, 0, cx, cy))
         state = json.loads(await ws.recv())
         if state["action_ok"] and state["gold"] < gold_before:
-            cell = state["map_grid"][cy * W + cx]
-            print(f"wall built at ({cx},{cy}): gold {gold_before}->{state['gold']}, "
+            cam0 = state.get("cam0_terrain", [])
+            cell = cam0[cy * CAM_W + cx] if cam0 else -1
+            print(f"wall built at cam0 ({cx},{cy}): gold {gold_before}->{state['gold']}, "
                   f"cell now {cell} ({'ok' if cell == 2 else 'UNEXPECTED'})")
             wall_at = (cx, cy)
             break
@@ -114,99 +125,86 @@ async def drive(ws):
         if (cx, cy) == wall_at:
             continue
         gold_before = state["gold"]
-        await ws.send(json.dumps({"command": "STEP", "action": 1, "x": cx, "y": cy}))
+        await ws.send(step_action(1, 0, cx, cy))
         state = json.loads(await ws.recv())
         if state["action_ok"] and state["gold"] < gold_before:
-            print(f"dynamite set at ({cx},{cy}): gold {gold_before}->{state['gold']}")
+            print(f"dynamite set at cam0 ({cx},{cy}): gold {gold_before}->{state['gold']}")
             boom_at = (cx, cy)
             break
     if not boom_at:
         print("dynamite placement: FAILED everywhere")
 
-    # arrows can sit on soil too, green is 5 gold on easy
     arrow_at = None
     for cx, cy in empties[:100]:
         if (cx, cy) in (wall_at, boom_at):
             continue
         gold_before = state["gold"]
-        await ws.send(json.dumps({"command": "STEP", "action": 3, "x": cx, "y": cy}))
+        await ws.send(step_action(3, 0, cx, cy))
         state = json.loads(await ws.recv())
         if state["action_ok"] and state["gold"] < gold_before:
-            print(f"arrow placed at ({cx},{cy}): gold {gold_before}->{state['gold']}")
+            print(f"arrow placed at cam0 ({cx},{cy}): gold {gold_before}->{state['gold']}")
             arrow_at = (cx, cy)
             break
     if not arrow_at:
         print("arrow placement: FAILED everywhere")
 
-    # new actions: 7 place tower, 8 reinforce, 9 toggle digger, 10 spawn warrior,
-    # 11 recall, 12 cannon, 13 toggle train. a tower runs 250 on easy and we just
-    # spent down near there on the wall/dynamite/arrow, so idle a bit to let the
-    # dwarves dig some gold back up first, then try to plant one. all of this
-    # reports rather than asserts since it leans on game state (gold on hand, a
-    # tower existing, warriors being home)
+    # tower: farm gold then place. costs 250 on easy
     for _ in range(8000):
         if state["gold"] >= 300 or state["terminated"]:
             break
-        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        await ws.send(step_action(0, 0, 0, 0))
         state = json.loads(await ws.recv())
     print(f"new actions: farmed up to gold={state['gold']} (a tower is 250 on easy)")
 
-    grid = state["map_grid"]
-    empties = [(c, r) for r in range(H) for c in range(W) if grid[r * W + c] == 1]
-    empties.sort(key=lambda p: (p[0] - 30) ** 2 + (p[1] - 20) ** 2)
+    cam0 = state.get("cam0_terrain", [])
+    empties = [(c, r) for r in range(CAM_H) for c in range(CAM_W)
+               if cam0[r * CAM_W + c] == 1]
+    empties.sort(key=lambda p: (p[0] - CAM_W // 2) ** 2 + (p[1] - CAM_H // 2) ** 2)
     tower_at = None
     for cx, cy in empties[:150]:
         if (cx, cy) in (wall_at, boom_at, arrow_at):
             continue
         gold_before = state["gold"]
-        await ws.send(json.dumps({"command": "STEP", "action": 7, "x": cx, "y": cy}))
+        await ws.send(step_action(7, 0, cx, cy))
         state = json.loads(await ws.recv())
         if state["action_ok"] and state["gold"] < gold_before:
-            print(f"tower built at ({cx},{cy}): gold {gold_before}->{state['gold']}")
+            print(f"tower built at cam0 ({cx},{cy}): gold {gold_before}->{state['gold']}")
             tower_at = (cx, cy)
             break
     if not tower_at:
         print(f"tower placement: none built (gold={state['gold']}, "
               f"needs 250 and a clear 7x7 off the city)")
 
-    # if a tower went up, poke its toggles, a warrior buy and a recall. the tower
-    # fills a 3x3 so the same tile addresses it
     if tower_at:
         tx, ty = tower_at
         for code, name in [(9, "toggle digger"), (13, "toggle train"),
                            (10, "spawn warrior"), (11, "recall warriors")]:
             gb = state["gold"]
-            await ws.send(json.dumps({"command": "STEP", "action": code,
-                                      "x": tx, "y": ty}))
+            await ws.send(step_action(code, 0, tx, ty))
             state = json.loads(await ws.recv())
             print(f"  {name} (action {code}): ok={state['action_ok']} "
                   f"gold {gb}->{state['gold']}")
-
-        # cannon needs warriors sitting home and something to hit, neither is
-        # guaranteed right here, so this mostly proves the path runs without
-        # throwing. tile is the target, fire at the tower and a few squares off
         for dx, dy in [(0, 0), (3, 0)]:
-            await ws.send(json.dumps({"command": "STEP", "action": 12,
-                                      "x": tx + dx, "y": ty + dy}))
-            state = json.loads(await ws.recv())
-            print(f"  cannon strike (action 12) at ({tx + dx},{ty + dy}): "
-                  f"ok={state['action_ok']}")
+            nx, ny = tx + dx, ty + dy
+            if 0 <= nx < CAM_W and 0 <= ny < CAM_H:
+                await ws.send(step_action(12, 0, nx, ny))
+                state = json.loads(await ws.recv())
+                print(f"  cannon strike (action 12) at cam0 ({nx},{ny}): "
+                      f"ok={state['action_ok']}")
 
-    # reinforce should refuse a full health wall and an empty tile both
     if wall_at:
-        await ws.send(json.dumps({"command": "STEP", "action": 8,
-                                  "x": wall_at[0], "y": wall_at[1]}))
+        await ws.send(step_action(8, 0, wall_at[0], wall_at[1]))
         state = json.loads(await ws.recv())
         print(f"reinforce full wall: ok={state['action_ok']} "
               f"({'refused, good' if not state['action_ok'] else 'UNEXPECTED PASS'})")
-    await ws.send(json.dumps({"command": "STEP", "action": 8, "x": 0, "y": 0}))
+    await ws.send(step_action(8, 0, 0, 0))
     state = json.loads(await ws.recv())
     print(f"reinforce empty tile: ok={state['action_ok']} "
           f"({'refused, good' if not state['action_ok'] else 'UNEXPECTED PASS'})")
 
-    # episode 2, same seed should give back the same map
+    # episode 2, same seed should give back the same map (compare cam0 terrain)
     again = await reset(ws, mode="m5", difficulty="Easy", seed=42)
-    same = again["map_grid"] == first["map_grid"]
+    same = again.get("cam0_terrain") == first.get("cam0_terrain")
     fresh = again["time_left"] > 18000 and again["gold"] == 250
     print(f"restart: fresh episode {'ok' if fresh else 'BAD'} "
           f"(time_left={again['time_left']} gold={again['gold']}), "
@@ -215,7 +213,7 @@ async def drive(ws):
     # different seed should give a different map
     other = await reset(ws, mode="m5", difficulty="Easy", seed=7)
     print(f"seed 7 differs from seed 42: "
-          f"{'ok' if other['map_grid'] != first['map_grid'] else 'IDENTICAL?!'}")
+          f"{'ok' if other.get('cam0_terrain') != first.get('cam0_terrain') else 'IDENTICAL?!'}")
 
     # mode switch, the m15 timer is 56700
     m15 = await reset(ws, mode="m15", difficulty="Easy", seed=42)
@@ -230,7 +228,8 @@ async def drive(ws):
     worst = 0.0
     steps = 0
     for _ in range(1200):
-        await ws.send(json.dumps({"command": "STEP", "action": 0}))
+        await ws.send(json.dumps({"command": "STEP", "action": 0,
+                                  "camera": 0, "x": 0, "y": 0}))
         state = json.loads(await ws.recv())
         worst = min(worst, state["immediate_reward"])
         steps += 1

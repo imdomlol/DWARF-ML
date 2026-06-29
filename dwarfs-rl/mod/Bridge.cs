@@ -350,15 +350,23 @@ namespace DwarfsMod
                 var t = game.GetType();
                 t.GetProperty("IsFixedTimeStep").SetValue(game, false, null);
                 t.GetProperty("InactiveSleepTime").SetValue(game, TimeSpan.Zero, null);
-                var gfx = t.GetField("graphics", BindingFlags.NonPublic | BindingFlags.Instance);
-                object gdm = gfx != null ? gfx.GetValue(game) : null;
-                if (gdm != null)
+                // vsync only ever blocks at Present, and headless suppresses Draw
+                // entirely (no Present), so flipping it there buys nothing. Worse,
+                // ApplyChanges recreates the Direct3D device, and several instances
+                // booting at once (--power auto-spawn) makes those simultaneous
+                // device resets throw. So only touch the device when we render.
+                if (rendering)
                 {
-                    gdm.GetType().GetProperty("SynchronizeWithVerticalRetrace").SetValue(gdm, false, null);
-                    gdm.GetType().GetMethod("ApplyChanges").Invoke(gdm, null);
+                    var gfx = t.GetField("graphics", BindingFlags.NonPublic | BindingFlags.Instance);
+                    object gdm = gfx != null ? gfx.GetValue(game) : null;
+                    if (gdm != null)
+                    {
+                        gdm.GetType().GetProperty("SynchronizeWithVerticalRetrace").SetValue(gdm, false, null);
+                        gdm.GetType().GetMethod("ApplyChanges").Invoke(gdm, null);
+                    }
                 }
                 fastClock = true;
-                Log("fast clock on (fixed step + vsync off)");
+                Log("fast clock on (fixed step" + (rendering ? " + vsync off)" : ", headless)"));
             }
             catch (Exception e) { Log("fast clock failed: " + e.Message); }
         }

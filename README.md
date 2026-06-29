@@ -37,8 +37,23 @@ The project lives under [`dwarfs-rl/`](dwarfs-rl/):
 - [dwarfs-rl/docs/](dwarfs-rl/docs/) — [SETUP.md](dwarfs-rl/docs/SETUP.md)
   (install / build / patch / run), [PROTOCOL.md](dwarfs-rl/docs/PROTOCOL.md)
   (the WebSocket wire format — source of truth for commands, replies and the
-  observation/action space), and [WHATS_NEW.md](dwarfs-rl/docs/WHATS_NEW.md)
-  (the latest actions, the trainer power flag and what changed).
+  observation/action space), [MULTIWORLD.md](dwarfs-rl/docs/MULTIWORLD.md) /
+  [HEADLESS.md](dwarfs-rl/docs/HEADLESS.md) (running many worlds per process / past
+  the GPU device ceiling), [PIVOT.md](dwarfs-rl/docs/PIVOT.md) (the agreed next-step
+  redesign of the observation/action — see *Active direction* below), and
+  [WHATS_NEW.md](dwarfs-rl/docs/WHATS_NEW.md) (the latest actions, the trainer power
+  flag and what changed).
+
+## Active direction
+
+The observation/action layer is being redesigned. Today it's **4 digger-following
+cameras** + a `[action, camera, x, y]` action (what *What works* and PROTOCOL.md
+describe). The agreed next step ([PIVOT.md](dwarfs-rl/docs/PIVOT.md)) replaces that
+with a **per-dwarf entity model**: one shared policy, trained across parallel
+worlds, that observes and commands *every* dwarf at once — each dwarf a small
+feature vector (nearest cave / ore / spawner / hazard), with "send toward X"
+translated into the game's own gold-paid arrow. The multi-world / parallel training
+infrastructure is unaffected by the change. It is **planned, not yet built**.
 
 ## Getting started
 

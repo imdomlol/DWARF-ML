@@ -3,6 +3,19 @@
 quick rundown of what i changed so youre not going in blind. the wire format
 stuff is still in [PROTOCOL.md](PROTOCOL.md).
 
+> **superseded (2026-06-28):** the entries below predate the 4-camera obs
+> redesign. the action space is now `MultiDiscrete([14, 4, 30, 30])` =
+> `(action, camera, x, y)` (a camera dim was added; x/y are 0-29 within the
+> chosen camera's 30x30 window), **not** the `[14, 60, 40]` written below. the
+> obs also gained a per-camera **dwarves layer** (1 digger, 2 warrior), so the
+> "no dwarf positions in the obs" caveat under *new actions* no longer holds.
+> [PROTOCOL.md](PROTOCOL.md) and `python/dwarfs_env.py` are the source of truth.
+>
+> **what's next:** the whole camera observation + `[action, camera, x, y]` action is
+> slated to be replaced by a per-dwarf entity model (observe/command all dwarves at
+> once, arrows instead of tile-picking). see [PIVOT.md](PIVOT.md) — planned, not yet
+> built.
+
 new actions are in the mod so just pulling wont get them, you gotta rebuild and
 re patch
 

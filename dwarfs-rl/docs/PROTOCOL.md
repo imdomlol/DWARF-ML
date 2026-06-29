@@ -1,5 +1,13 @@
 # bridge protocol
 
+> **Heads up — planned schema change ([PIVOT.md](PIVOT.md)).** the 4-camera
+> observation (`cam0..3`) and the `[action, camera, x, y]` action documented here
+> are slated to be replaced by a **per-dwarf entity model** (all dwarves observed +
+> commanded at once; "send toward cave/ore" → the game's gold-paid arrow). that
+> work isn't built yet, so **everything below is still the live contract** — this is
+> the source of truth for what the code does today. when the pivot lands, the obs/
+> action sections here change together with `mod/World.cs` and `python/dwarfs_env.py`.
+
 the gym environment runs a **websocket server** on `ws://localhost:8765` and
 the mod **connects to it** when the game starts (retrying every few seconds til
 the env is up, reconnecting if it drops). messages are json text frames, one

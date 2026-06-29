@@ -9,6 +9,13 @@ feature: the goal, what we've learned, what exists today, and what's left. The
 broader headless investigation (paths A–F) lives in [HEADLESS.md](HEADLESS.md);
 this is the deep dive on Path C.
 
+> **Note on the obs/action pivot ([PIVOT.md](PIVOT.md)).** The planned per-dwarf
+> entity redesign of the observation/action layer is **orthogonal to multi-world and
+> survives it unchanged** — multi-world is about *how many worlds run per process /
+> GPU device*, not *what each world observes*. The pivot makes each world cheaper
+> (smaller net + payload), so if anything it scales slightly better here. Nothing in
+> this doc needs to change for the pivot; only the per-world obs/action does.
+
 ---
 
 ## 1. The goal
